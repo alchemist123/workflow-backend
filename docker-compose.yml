@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nocode
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  api:
+    build: .
+    ports:
+      - "${API_PORT:-8001}:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/nocode
+      REDIS_URL: redis://redis:6379/0
+      PACKAGES_DIR: /packages
+      HOST_PACKAGES_DIR: /Users/amalvs/Documents/projects/no-code-platform/backend/packages
+      GOOGLE_CLOUD_PROJECT: arabbank-dev-agentic-prj
+      VERTEX_AI_LOCATION: us-central1
+      GOOGLE_APPLICATION_CREDENTIALS: /root/.config/gcloud/application_default_credentials.json
+      GOOGLE_GENAI_USE_VERTEXAI: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - ./packages:/packages
+      - ~/.config/gcloud:/root/.config/gcloud:ro
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app
+
+volumes:
+  pgdata:
