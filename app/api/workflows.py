@@ -1,5 +1,5 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks  # BackgroundTasks used by execute
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from app.database import get_db
@@ -224,13 +224,13 @@ async def get_node_logs(workflow_id: str, execution_id: str, db: AsyncSession = 
 async def package_workflow(
     workflow_id: str,
     version_id: str,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    """Build a Docker runner image for a validated workflow version.
+    """Generate a fully self-contained project directory for this workflow version.
 
-    Returns immediately with a deploy_id.  Poll GET /deploys/{deploy_id} for status.
-    If Docker is unavailable, returns a ready-to-use runner directory path instead.
+    The directory contains main.py, Dockerfile, docker-compose.yml, requirements.txt,
+    .env.example, ir.json and a README.  It has zero dependency on this backend.
+    Run `docker compose up --build` inside it to start the workflow as a service.
     """
     result = await db.execute(
         select(WorkflowVersion)
@@ -240,59 +240,16 @@ async def package_workflow(
     if not version:
         raise HTTPException(status_code=404, detail="Version not found")
     if not version.is_valid or not version.ir_json:
-        raise HTTPException(status_code=422, detail="Version must be valid before deploying")
+        raise HTTPException(status_code=422, detail="Version must be valid and compiled before packaging")
 
-    # Fetch workflow name for a nicer generated app title
     wf = await _get_or_404(db, Workflow, workflow_id)
     workflow_name = (wf.name or "workflow").lower().replace(" ", "-")
 
-    deploy_id = str(uuid.uuid4())
-    _deploy_write(deploy_id, {"status": "building", "deploy_id": deploy_id, "version_id": version_id})
-
-    background_tasks.add_task(_run_docker_build, deploy_id, version.ir_json, version_id, workflow_name)
-    return {"deploy_id": deploy_id, "status": "building", "message": "Docker build started — poll /api/v1/deploys/{deploy_id} for status"}
-
-
-# ── File-based deploy status store ───────────────────────────────────────────
-# Persisted as JSON files so a uvicorn reload doesn't wipe in-flight deploys.
-
-def _deploy_dir() -> "Path":
-    import os
-    from pathlib import Path
-    root = Path(os.environ.get("PACKAGES_DIR", str(Path(__file__).parent.parent.parent / "packages")))
-    d = root / ".deploys"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-def _deploy_write(deploy_id: str, data: dict) -> None:
-    import json as _j
-    (_deploy_dir() / f"{deploy_id}.json").write_text(_j.dumps(data))
-
-def _deploy_read(deploy_id: str) -> dict | None:
-    import json as _j
-    p = _deploy_dir() / f"{deploy_id}.json"
-    return _j.loads(p.read_text()) if p.exists() else None
-
-
-async def _run_docker_build(deploy_id: str, ir_json: dict, version_id: str, workflow_name: str = "workflow"):
+    from app.packaging.builder import build_runner_package
     import asyncio
-    from app.packaging.builder import build_runner_package, build_docker_image
-    try:
-        runner_dir = build_runner_package(ir_json, version_id, workflow_name)
-        loop = asyncio.get_event_loop()
-        build_result = await loop.run_in_executor(None, build_docker_image, runner_dir, version_id)
-        _deploy_write(deploy_id, {**build_result, "deploy_id": deploy_id, "status": "done" if build_result.get("success") else "failed"})
-    except Exception as e:
-        _deploy_write(deploy_id, {"deploy_id": deploy_id, "status": "failed", "success": False, "error": str(e)})
-
-
-@router.get("/deploys/{deploy_id}")
-async def get_deploy_status(deploy_id: str):
-    """Poll deploy build status."""
-    entry = _deploy_read(deploy_id)
-    if not entry:
-        raise HTTPException(status_code=404, detail="Deploy job not found")
-    return entry
+    loop = asyncio.get_event_loop()
+    pkg = await loop.run_in_executor(None, build_runner_package, version.ir_json, version_id, workflow_name)
+    return pkg
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────

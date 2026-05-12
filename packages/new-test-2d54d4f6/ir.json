@@ -1,0 +1,239 @@
+{
+  "workflow_version_id": "2d54d4f6-3e9b-4606-8587-ebbfb6c3f62b",
+  "entrypoints": [
+    "node_1778395978595_1"
+  ],
+  "nodes": {
+    "node_1778395978595_1": {
+      "kind": "trigger.http",
+      "node_type": "HTTP_TRIGGER",
+      "config": {
+        "path": "/runner",
+        "body_schema": {
+          "fields": [
+            {
+              "name": "user_data",
+              "type": "string",
+              "description": "ask diet qns",
+              "required": true
+            }
+          ]
+        }
+      },
+      "policies": {
+        "timeout_seconds": 60,
+        "retry_max_attempts": 1,
+        "on_error": "fail"
+      },
+      "metadata": {
+        "title": "HTTP TRIGGER",
+        "description": ""
+      },
+      "io": {
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        }
+      },
+      "next": [
+        "node_1778397297641_3"
+      ],
+      "branches": {}
+    },
+    "node_1778395983825_2": {
+      "kind": "task.agent",
+      "node_type": "AGENT",
+      "config": {},
+      "policies": {
+        "timeout_seconds": 60,
+        "retry_max_attempts": 1,
+        "on_error": "fail"
+      },
+      "metadata": {
+        "title": "AGENT",
+        "description": ""
+      },
+      "io": {
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        }
+      },
+      "next": [],
+      "branches": {}
+    },
+    "node_1778397297641_3": {
+      "kind": "task.orchestrator_agent",
+      "node_type": "ORCHESTRATOR_AGENT",
+      "config": {
+        "model": "gemini-2.0-flash",
+        "api_key": "AIzaSyAHSuhm9c39zHNvyvApA_uJSJ0YqOoupbQ",
+        "framework": "adk",
+        "functions": [],
+        "system_prompt": "you are diet manager use tool to generate report, use remote agents for any needed",
+        "max_iterations": 6,
+        "vertex_project": "arabbank-dev-agentic-prj",
+        "tool_execution_mode": "parallel",
+        "model_provider": "google",
+        "resolved_tools": {
+          "mcp_servers": [
+            {
+              "name": "TOOL",
+              "url": "http://host.docker.internal:9002/mcp",
+              "transport": "http",
+              "node_id": "node_1778398206624_9",
+              "node_type": "TOOL"
+            }
+          ],
+          "a2a_agents": [
+            {
+              "name": "diet agent",
+              "endpoint": "http://host.docker.internal:8083",
+              "description": "diet manager",
+              "auth_token": "",
+              "node_id": "node_1778398268881_11",
+              "node_type": "REMOTE_AGENT"
+            }
+          ],
+          "functions": []
+        }
+      },
+      "policies": {
+        "timeout_seconds": 60,
+        "retry_max_attempts": 1,
+        "on_error": "fail"
+      },
+      "metadata": {
+        "title": "ORCHESTRATOR AGENT",
+        "description": ""
+      },
+      "io": {
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        }
+      },
+      "next": [
+        "node_1778398299167_12"
+      ],
+      "branches": {}
+    },
+    "node_1778398206624_9": {
+      "kind": "task.tool",
+      "node_type": "TOOL",
+      "config": {
+        "mcp_url": "http://host.docker.internal:9002/mcp",
+        "tool_name": "diet test"
+      },
+      "policies": {
+        "timeout_seconds": 60,
+        "retry_max_attempts": 1,
+        "on_error": "fail"
+      },
+      "metadata": {
+        "title": "TOOL",
+        "description": "tool for diet details"
+      },
+      "io": {
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        }
+      },
+      "next": [],
+      "branches": {}
+    },
+    "node_1778398268881_11": {
+      "kind": "task.remote_agent",
+      "node_type": "REMOTE_AGENT",
+      "config": {
+        "endpoint": "http://host.docker.internal:8083",
+        "description": "diet manager",
+        "name": "diet agent"
+      },
+      "policies": {
+        "timeout_seconds": 60,
+        "retry_max_attempts": 1,
+        "on_error": "fail"
+      },
+      "metadata": {
+        "title": "REMOTE AGENT",
+        "description": ""
+      },
+      "io": {
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        }
+      },
+      "next": [],
+      "branches": {}
+    },
+    "node_1778398299167_12": {
+      "kind": "task.model",
+      "node_type": "MODEL",
+      "config": {
+        "model": "gemini-2.0-flash-001",
+        "api_key": "AIzaSyAHSuhm9c39zHNvyvApA_uJSJ0YqOoupbQ",
+        "provider": "vertex_ai",
+        "system_prompt": "summerize the content",
+        "vertex_project": "arabbank-dev-agentic-prj"
+      },
+      "policies": {
+        "timeout_seconds": 60,
+        "retry_max_attempts": 1,
+        "on_error": "fail"
+      },
+      "metadata": {
+        "title": "MODEL",
+        "description": ""
+      },
+      "io": {
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        }
+      },
+      "next": [
+        "node_1778475500133_2"
+      ],
+      "branches": {}
+    },
+    "node_1778475500133_2": {
+      "kind": "task.end",
+      "node_type": "END",
+      "config": {},
+      "policies": {
+        "timeout_seconds": 60,
+        "retry_max_attempts": 1,
+        "on_error": "fail"
+      },
+      "metadata": {
+        "title": "END",
+        "description": ""
+      },
+      "io": {
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        }
+      },
+      "next": [],
+      "branches": {}
+    }
+  }
+}

@@ -3,12 +3,6 @@ from dataclasses import dataclass
 from typing import Any
 from app.nodes.base import NodeDefinition, PaletteMetadata
 
-_ANTHROPIC_MODELS = [
-    "claude-opus-4-7",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
-]
-
 _GOOGLE_MODELS = [
     "gemini-2.0-flash",
     "gemini-2.5-pro-preview-03-25",
@@ -49,18 +43,18 @@ class ModelNode(NodeDefinition):
             "properties": {
                 "provider": {
                     "type": "string",
-                    "enum": ["anthropic", "google", "vertex_ai"],
-                    "default": "anthropic",
+                    "enum": ["google", "vertex_ai"],
+                    "default": "google",
                     "description": "LLM provider",
                 },
                 "model": {
                     "type": "string",
-                    "default": "claude-sonnet-4-6",
+                    "default": "gemini-2.0-flash",
                     "description": "Model name",
                 },
                 "api_key": {
                     "type": "string",
-                    "description": "API key (Anthropic or Google AI Studio) — overrides server env var",
+                    "description": "Google AI Studio API key — overrides GOOGLE_API_KEY env var",
                 },
                 "vertex_project": {
                     "type": "string",
@@ -102,12 +96,10 @@ class ModelNode(NodeDefinition):
         self.output_handles = ["output"]
 
     async def execute(self, node_config: dict, input_data: dict, context: Any) -> dict:
-        provider = node_config.get("provider", "anthropic")
-        if provider == "google":
-            return await _call_gemini(node_config, input_data)
+        provider = node_config.get("provider", "google")
         if provider == "vertex_ai":
             return await _call_vertex_ai(node_config, input_data)
-        return await _call_anthropic(node_config, input_data)
+        return await _call_gemini(node_config, input_data)
 
 
 # ── Jinja2 prompt rendering ────────────────────────────────────────────────────

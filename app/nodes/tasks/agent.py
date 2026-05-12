@@ -19,21 +19,15 @@ class AgentNode(NodeDefinition):
             category="ai",
             color="#f59e0b",
             icon="Bot",
-            description="AI agent with MCP tools and A2A connections",
+            description="AI agent (ADK) with MCP tools and A2A connections",
         )
         self.config_schema = {
             "type": "object",
             "properties": {
-                "framework": {
-                    "type": "string",
-                    "enum": ["anthropic", "langgraph", "adk"],
-                    "default": "anthropic",
-                    "description": "Agent execution framework",
-                },
                 "model": {
                     "type": "string",
-                    "default": "claude-opus-4-7",
-                    "description": "LLM model ID (e.g. claude-opus-4-7, gemini-2.0-flash)",
+                    "default": "gemini-2.0-flash",
+                    "description": "Gemini model ID (e.g. gemini-2.0-flash, gemini-1.5-pro)",
                 },
                 "system_prompt": {
                     "type": "string",
@@ -45,23 +39,10 @@ class AgentNode(NodeDefinition):
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {
-                                "type": "string",
-                                "description": "Server alias used as tool-name prefix",
-                            },
-                            "url": {
-                                "type": "string",
-                                "description": "MCP server base URL (JSON-RPC over HTTP/SSE)",
-                            },
-                            "transport": {
-                                "type": "string",
-                                "enum": ["http", "sse"],
-                                "default": "http",
-                            },
-                            "auth": {
-                                "type": "object",
-                                "description": "Optional HTTP headers for auth",
-                            },
+                            "name": {"type": "string", "description": "Server alias used as tool-name prefix"},
+                            "url": {"type": "string", "description": "MCP server base URL"},
+                            "transport": {"type": "string", "enum": ["http", "sse"], "default": "http"},
+                            "auth": {"type": "object", "description": "Optional HTTP headers for auth"},
                         },
                         "required": ["name", "url"],
                     },
@@ -73,14 +54,8 @@ class AgentNode(NodeDefinition):
                         "type": "object",
                         "properties": {
                             "name": {"type": "string"},
-                            "endpoint": {
-                                "type": "string",
-                                "description": "A2A agent endpoint URL",
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "What this agent does (shown to the LLM)",
-                            },
+                            "endpoint": {"type": "string", "description": "A2A agent endpoint URL"},
+                            "description": {"type": "string", "description": "What this agent does (shown to the LLM)"},
                         },
                         "required": ["name", "endpoint"],
                     },
@@ -90,6 +65,19 @@ class AgentNode(NodeDefinition):
                     "default": 10,
                     "description": "Max agentic-loop iterations before giving up",
                 },
+                "api_key": {
+                    "type": "string",
+                    "description": "Google AI Studio API key — leave empty to use GOOGLE_API_KEY env var or ADC",
+                },
+                "vertex_project": {
+                    "type": "string",
+                    "description": "GCP project ID — enables Vertex AI backend",
+                },
+                "vertex_location": {
+                    "type": "string",
+                    "default": "us-central1",
+                    "description": "Vertex AI region",
+                },
             },
         }
         self.input_schema = {"type": "object"}
@@ -97,226 +85,118 @@ class AgentNode(NodeDefinition):
             "type": "object",
             "properties": {
                 "result": {},
-                "usage": {
-                    "type": "object",
-                    "properties": {
-                        "input_tokens": {"type": "integer"},
-                        "output_tokens": {"type": "integer"},
-                    },
-                },
+                "usage": {"type": "object"},
             },
         }
         self.output_handles = ["output", "error"]
 
     async def execute(self, node_config: dict, input_data: dict, context: Any) -> dict:
-        framework = node_config.get("framework", "anthropic")
-        if framework == "anthropic":
-            return await _run_anthropic_agent(node_config, input_data)
-        if framework == "langgraph":
-            return await _run_langgraph_agent(node_config, input_data)
-        if framework == "adk":
-            return await _run_adk_agent(node_config, input_data)
-        raise ValueError(f"Unknown agent framework: {framework!r}")
+        return await _run_adk_agent(node_config, input_data, context)
 
 
-# ── Anthropic agentic loop with MCP + A2A ─────────────────────────────────────
+# ── Google ADK agent ──────────────────────────────────────────────────────────
 
-async def _run_anthropic_agent(config: dict, input_data: dict) -> dict:
-    try:
-        import anthropic
-    except ImportError:
-        return {"error": "anthropic package not installed", "result": None}
-
-    import json as _json
-    import httpx
-
-    model = config.get("model", "claude-opus-4-7")
-    system_prompt = config.get("system_prompt", "You are a helpful assistant.")
-    mcp_servers: list[dict] = config.get("mcp_servers") or []
-    a2a_agents: list[dict] = config.get("a2a_agents") or []
-    max_iterations: int = config.get("max_iterations", 10)
-
-    client = anthropic.Anthropic()
-    tools: list[dict] = []
-    mcp_tool_map: dict[str, tuple[dict, str]] = {}  # full_name -> (server, real_tool_name)
-
-    # Discover tools from every MCP server
-    async with httpx.AsyncClient(timeout=15) as http:
-        for srv in mcp_servers:
-            try:
-                resp = await http.post(
-                    srv["url"],
-                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-                    headers=srv.get("auth") or {},
-                )
-                for tool in resp.json().get("result", {}).get("tools", []):
-                    full = f"{srv['name']}__{tool['name']}"
-                    tools.append({
-                        "name": full,
-                        "description": tool.get("description", ""),
-                        "input_schema": tool.get("inputSchema", {"type": "object"}),
-                    })
-                    mcp_tool_map[full] = (srv, tool["name"])
-            except Exception:
-                pass  # unreachable server — skip silently
-
-    # Expose A2A peers as callable tools
-    for ag in a2a_agents:
-        tools.append({
-            "name": f"a2a__{ag['name']}",
-            "description": ag.get("description", f"Delegate a task to the '{ag['name']}' agent"),
-            "input_schema": {
-                "type": "object",
-                "properties": {"message": {"type": "string", "description": "Task description for the agent"}},
-                "required": ["message"],
-            },
-        })
-
-    messages: list[dict] = [{"role": "user", "content": _json.dumps(input_data)}]
-    in_tokens = out_tokens = 0
-
-    for _ in range(max_iterations):
-        kwargs: dict = {
-            "model": model,
-            "max_tokens": 4096,
-            "system": system_prompt,
-            "messages": messages,
-        }
-        if tools:
-            kwargs["tools"] = tools
-
-        resp = client.messages.create(**kwargs)
-        in_tokens += resp.usage.input_tokens
-        out_tokens += resp.usage.output_tokens
-
-        if resp.stop_reason == "end_turn":
-            texts = [b.text for b in resp.content if hasattr(b, "text")]
-            text = texts[-1] if texts else ""
-            try:
-                data = _json.loads(text)
-            except Exception:
-                data = {"result": text}
-            return {**data, "usage": {"input_tokens": in_tokens, "output_tokens": out_tokens}}
-
-        if resp.stop_reason != "tool_use":
-            break
-
-        messages.append({"role": "assistant", "content": resp.content})
-        tool_results: list[dict] = []
-
-        async with httpx.AsyncClient(timeout=30) as http:
-            for tu in (b for b in resp.content if b.type == "tool_use"):
-                if tu.name in mcp_tool_map:
-                    srv, real_name = mcp_tool_map[tu.name]
-                    try:
-                        r = await http.post(
-                            srv["url"],
-                            json={
-                                "jsonrpc": "2.0", "id": 1,
-                                "method": "tools/call",
-                                "params": {"name": real_name, "arguments": tu.input},
-                            },
-                            headers=srv.get("auth") or {},
-                        )
-                        content = _json.dumps(r.json().get("result", r.json()))
-                    except Exception as exc:
-                        content = _json.dumps({"error": str(exc)})
-
-                elif tu.name.startswith("a2a__"):
-                    ag_name = tu.name[5:]
-                    ag = next((a for a in a2a_agents if a["name"] == ag_name), None)
-                    try:
-                        assert ag
-                        r = await http.post(
-                            ag["endpoint"],
-                            json={"message": tu.input.get("message", _json.dumps(tu.input))},
-                        )
-                        content = _json.dumps(r.json())
-                    except Exception as exc:
-                        content = _json.dumps({"error": str(exc)})
-
-                else:
-                    content = _json.dumps({"error": f"Unknown tool: {tu.name}"})
-
-                tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": content})
-
-        messages.append({"role": "user", "content": tool_results})
-
-    return {
-        "result": None,
-        "error": "max_iterations_reached",
-        "usage": {"input_tokens": in_tokens, "output_tokens": out_tokens},
-    }
-
-
-# ── LangGraph ─────────────────────────────────────────────────────────────────
-
-async def _run_langgraph_agent(config: dict, input_data: dict) -> dict:
-    try:
-        from langchain_anthropic import ChatAnthropic
-        from langchain_mcp_adapters.client import MultiServerMCPClient
-        from langgraph.prebuilt import create_react_agent
-    except ImportError:
-        return {"error": "langgraph, langchain-anthropic, or langchain-mcp-adapters not installed", "result": None}
-
-    import json as _json
-
-    mcp_servers: list[dict] = config.get("mcp_servers") or []
-    mcp_config = {
-        s["name"]: {"url": s["url"], "transport": s.get("transport", "http")}
-        for s in mcp_servers
-    }
-    llm = ChatAnthropic(model=config.get("model", "claude-opus-4-7"))
-
-    async with MultiServerMCPClient(mcp_config) as mcp:
-        tools = mcp.get_tools()
-        agent = create_react_agent(llm, tools)
-        result = await agent.ainvoke({
-            "messages": [{"role": "user", "content": _json.dumps(input_data)}]
-        })
-        last = result["messages"][-1]
-        content = last.content if hasattr(last, "content") else str(last)
-        try:
-            return _json.loads(content)
-        except Exception:
-            return {"result": content}
-
-
-# ── Google ADK ────────────────────────────────────────────────────────────────
-
-async def _run_adk_agent(config: dict, input_data: dict) -> dict:
+async def _run_adk_agent(config: dict, input_data: dict, ctx=None) -> dict:
     try:
         from google.adk.agents import LlmAgent
         from google.adk.sessions import InMemorySessionService
         from google.adk.runners import Runner
+        from google.adk.tools import FunctionTool
         import google.genai.types as genai_types
     except ImportError:
         return {"error": "google-adk not installed. Run: pip install google-adk", "result": None}
 
     import json as _json
     import uuid
+    import os
+    import httpx
 
-    model_id = config.get("model", "gemini-2.0-flash")
-    system_prompt = config.get("system_prompt", "You are a helpful assistant.")
+    from app.nodes.tasks.orchestrator_agent import (
+        _mcp_url, _mcp_init_session, _mcp_headers,
+        _mcp_parse_tools_list, _mcp_parse_call_result, _a2a_call,
+    )
 
+    vertex_project = config.get("vertex_project") or ""
+    vertex_location = config.get("vertex_location") or "us-central1"
+    api_key = config.get("api_key") or ""
+
+    if vertex_project:
+        os.environ["GOOGLE_CLOUD_PROJECT"] = vertex_project
+        os.environ["GOOGLE_CLOUD_LOCATION"] = vertex_location
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
+        os.environ.pop("GOOGLE_API_KEY", None)
+    elif api_key:
+        os.environ["GOOGLE_API_KEY"] = api_key
+        os.environ.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
+
+    mcp_servers: list = config.get("mcp_servers") or []
+    a2a_agents: list = config.get("a2a_agents") or []
+    adk_tools: list = []
+
+    async with httpx.AsyncClient(timeout=15) as http:
+        for srv in mcp_servers:
+            try:
+                mcp_base = _mcp_url(srv["url"])
+                extra_hdrs = srv.get("auth") or {}
+                sid = await _mcp_init_session(http, mcp_base, extra_hdrs)
+                resp = await http.post(
+                    mcp_base,
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                    headers=_mcp_headers(extra_hdrs, sid),
+                )
+                for tool in _mcp_parse_tools_list(resp):
+                    def _make_mcp_tool(srv_cfg, tool_name, full_name, desc):
+                        async def mcp_fn(**kwargs) -> dict:
+                            try:
+                                base = _mcp_url(srv_cfg["url"])
+                                eh = srv_cfg.get("auth") or {}
+                                async with httpx.AsyncClient(timeout=30) as h:
+                                    s = await _mcp_init_session(h, base, eh)
+                                    r = await h.post(
+                                        base,
+                                        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                              "params": {"name": tool_name, "arguments": kwargs}},
+                                        headers=_mcp_headers(eh, s),
+                                    )
+                                return _mcp_parse_call_result(r)
+                            except Exception as exc:
+                                return {"error": str(exc)}
+                        mcp_fn.__name__ = full_name.replace("-", "_").replace(".", "_")
+                        mcp_fn.__doc__ = desc or f"MCP tool {full_name}"
+                        return FunctionTool(mcp_fn)
+                    full = f"{srv['name']}__{tool['name']}"
+                    adk_tools.append(_make_mcp_tool(srv, tool["name"], full, tool.get("description", "")))
+            except Exception:
+                pass
+
+    for ag in a2a_agents:
+        def _make_a2a(agent_cfg):
+            async def call_agent(message: str) -> dict:
+                try:
+                    async with httpx.AsyncClient(timeout=60) as h:
+                        return await _a2a_call(h, agent_cfg["endpoint"], message, agent_cfg.get("auth_token", ""))
+                except Exception as exc:
+                    return {"error": str(exc)}
+            call_agent.__name__ = f"a2a_{agent_cfg['name'].replace('-', '_').replace(' ', '_')}"
+            call_agent.__doc__ = agent_cfg.get("description", f"Delegate to remote agent '{agent_cfg['name']}'")
+            return FunctionTool(call_agent)
+        adk_tools.append(_make_a2a(ag))
+
+    instruction = config.get("system_prompt", "You are a helpful assistant.")
     agent = LlmAgent(
         name="workflow_agent",
-        model=model_id,
-        description=system_prompt,
-        instruction=system_prompt,
+        model=config.get("model", "gemini-2.0-flash"),
+        description=instruction,
+        instruction=instruction,
+        tools=adk_tools,
     )
     session_service = InMemorySessionService()
-    app_name = "nocode_workflow"
-    user_id = "runner"
+    app_name, user_id = "nocode_workflow", "runner"
     session_id = str(uuid.uuid4())
-
     await session_service.create_session(app_name=app_name, user_id=user_id, session_id=session_id)
     runner = Runner(agent=agent, app_name=app_name, session_service=session_service)
 
-    content = genai_types.Content(
-        role="user",
-        parts=[genai_types.Part(text=_json.dumps(input_data))],
-    )
+    content = genai_types.Content(role="user", parts=[genai_types.Part(text=_json.dumps(input_data))])
     final_text = ""
     async for event in runner.run_async(user_id=user_id, session_id=session_id, new_message=content):
         if event.is_final_response() and event.content:

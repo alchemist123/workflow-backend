@@ -1,0 +1,12 @@
+services:
+  workflow:
+    build: .
+    ports:
+      - "8080:8000"
+    env_file:
+      - .env
+    volumes:
+      - ~/.config/gcloud:/root/.config/gcloud:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json
+    restart: unless-stopped

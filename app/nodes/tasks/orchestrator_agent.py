@@ -35,12 +35,7 @@ class OrchestratorAgentNode(NodeDefinition):
         self.config_schema = {
             "type": "object",
             "properties": {
-                "framework": {
-                    "type": "string",
-                    "enum": ["anthropic", "langgraph", "adk"],
-                    "default": "anthropic",
-                },
-                "model": {"type": "string", "default": "claude-opus-4-7"},
+                "model": {"type": "string", "default": "gemini-2.0-flash"},
                 "system_prompt": {"type": "string"},
                 "max_iterations": {"type": "integer", "default": 10},
                 "tool_execution_mode": {
@@ -69,7 +64,7 @@ class OrchestratorAgentNode(NodeDefinition):
                 },
                 "api_key": {
                     "type": "string",
-                    "description": "API key — Anthropic key for anthropic/langgraph, Google AI Studio key for ADK without Vertex AI",
+                    "description": "Google AI Studio API key — leave empty to use GOOGLE_API_KEY env var or ADC",
                 },
                 "vertex_project": {
                     "type": "string",
@@ -105,15 +100,7 @@ class OrchestratorAgentNode(NodeDefinition):
         self.output_handles = ["output", "error"]
 
     async def execute(self, node_config: dict, input_data: dict, context: Any) -> dict:
-        framework = node_config.get("framework", "anthropic")
-        if framework == "anthropic":
-            result = await _run_anthropic(node_config, input_data, context)
-        elif framework == "langgraph":
-            result = await _run_langgraph(node_config, input_data)
-        elif framework == "adk":
-            result = await _run_adk(node_config, input_data, context)
-        else:
-            raise ValueError(f"Unknown framework: {framework!r}")
+        result = await _run_adk(node_config, input_data, context)
 
         # If output_field is configured, extract that key for downstream nodes
         output_field = node_config.get("output_field")
@@ -238,7 +225,7 @@ async def _a2a_call(http, endpoint: str, message: str, auth_token: str = "") -> 
     return result
 
 
-# ── Anthropic agentic loop ────────────────────────────────────────────────────
+# ── Tool-node logging ────────────────────────────────────────────────────────
 
 async def _log_tool_node(ctx, node_id: str | None, node_type: str, status: str, error: str | None = None) -> None:
     """Write/update a NodeExecutionLog row for a tool-provider canvas node.
@@ -283,236 +270,9 @@ async def _log_tool_node(ctx, node_id: str | None, node_type: str, status: str, 
         pass  # tool-node status is best-effort; never let logging break execution
 
 
-async def _dispatch_tool_call(tu, mcp_tool_map, a2a_map, fn_map, _json, ctx=None) -> dict:
-    """Execute one tool call and return the tool_result block."""
-    import httpx
-
-    if tu.name in mcp_tool_map:
-        srv, real_name = mcp_tool_map[tu.name]
-        node_id = srv.get("node_id")
-        node_type = srv.get("node_type", "TOOL")
-        await _log_tool_node(ctx, node_id, node_type, "running")
-        try:
-            mcp_base = _mcp_url(srv["url"])
-            extra_hdrs = srv.get("auth") or {}
-            async with httpx.AsyncClient(timeout=30) as http:
-                sid = await _mcp_init_session(http, mcp_base, extra_hdrs)
-                r = await http.post(
-                    mcp_base,
-                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                          "params": {"name": real_name, "arguments": tu.input}},
-                    headers=_mcp_headers(extra_hdrs, sid),
-                )
-            content = _json.dumps(_mcp_parse_call_result(r))
-            await _log_tool_node(ctx, node_id, node_type, "success")
-        except Exception as exc:
-            content = _json.dumps({"error": str(exc)})
-            await _log_tool_node(ctx, node_id, node_type, "failed", str(exc))
-
-    elif tu.name in a2a_map:
-        ag = a2a_map[tu.name]
-        node_id = ag.get("node_id")
-        node_type = ag.get("node_type", "REMOTE_AGENT")
-        await _log_tool_node(ctx, node_id, node_type, "running")
-        try:
-            msg = tu.input.get("message", _json.dumps(tu.input))
-            async with httpx.AsyncClient(timeout=60) as http:
-                result = await _a2a_call(http, ag["endpoint"], msg, ag.get("auth_token", ""))
-            content = _json.dumps(result)
-            await _log_tool_node(ctx, node_id, node_type, "success")
-        except Exception as exc:
-            content = _json.dumps({"error": str(exc)})
-            await _log_tool_node(ctx, node_id, node_type, "failed", str(exc))
-
-    elif tu.name in fn_map:
-        fn = fn_map[tu.name]
-        node_id = fn.get("node_id")
-        node_type = fn.get("node_type", "FUNCTION")
-        await _log_tool_node(ctx, node_id, node_type, "running")
-        try:
-            local_ns = {**tu.input, "data": tu.input, "input_data": tu.input}
-            exec(compile(fn["code"], "<function>", "exec"), dict(_SAFE_BUILTINS), local_ns)
-            result = local_ns.get("result", local_ns.get("output"))
-            content = _json.dumps({"result": result} if not isinstance(result, dict) else result)
-            await _log_tool_node(ctx, node_id, node_type, "success")
-        except Exception as exc:
-            content = _json.dumps({"error": str(exc)})
-            await _log_tool_node(ctx, node_id, node_type, "failed", str(exc))
-
-    else:
-        content = _json.dumps({"error": f"Unknown tool: {tu.name}"})
-
-    return {"type": "tool_result", "tool_use_id": tu.id, "content": content}
-
-
 async def _run_anthropic(config: dict, input_data: dict, ctx=None) -> dict:
-    try:
-        import anthropic
-    except ImportError:
-        return {"error": "anthropic package not installed", "result": None}
-
-    import asyncio
-    import json as _json
-    import httpx
-
-    model = config.get("model", "claude-opus-4-7")
-    system_prompt = config.get("system_prompt", "You are a helpful assistant.")
-    max_iterations: int = config.get("max_iterations", 10)
-    parallel: bool = config.get("tool_execution_mode", "sequential") == "parallel"
-
-    # resolved_tools are injected by the IR compiler from connected nodes.
-    # Falls back to inline config fields for standalone / backwards compat.
-    resolved = config.get("resolved_tools") or {}
-    mcp_servers = (resolved.get("mcp_servers") or []) + (config.get("mcp_servers") or [])
-    a2a_agents  = (resolved.get("a2a_agents")  or []) + (config.get("a2a_agents")  or [])
-    functions   = (resolved.get("functions")   or []) + (config.get("functions")   or [])
-
-    from app.config import get_settings
-    settings = get_settings()
-    api_key = config.get("api_key") or settings.anthropic_api_key
-    client = anthropic.AsyncAnthropic(api_key=api_key) if api_key else anthropic.AsyncAnthropic()
-    tools: list[dict] = []
-    mcp_tool_map: dict[str, tuple[dict, str]] = {}
-    a2a_map: dict[str, dict] = {}
-    fn_map: dict[str, dict] = {}
-
-    # Discover tools from every MCP server
-    async with httpx.AsyncClient(timeout=15) as http:
-        for srv in mcp_servers:
-            try:
-                mcp_base = _mcp_url(srv["url"])
-                extra_hdrs = srv.get("auth") or {}
-                sid = await _mcp_init_session(http, mcp_base, extra_hdrs)
-                resp = await http.post(
-                    mcp_base,
-                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-                    headers=_mcp_headers(extra_hdrs, sid),
-                )
-                for tool in _mcp_parse_tools_list(resp):
-                    full = f"{srv['name']}__{tool['name']}"
-                    tools.append({
-                        "name": full,
-                        "description": tool.get("description", ""),
-                        "input_schema": tool.get("inputSchema", {"type": "object"}),
-                    })
-                    mcp_tool_map[full] = (srv, tool["name"])
-            except Exception:
-                pass
-
-    # A2A remote agents as callable tools
-    for ag in a2a_agents:
-        tname = f"a2a__{ag['name']}"
-        tools.append({
-            "name": tname,
-            "description": ag.get("description", f"Delegate task to '{ag['name']}'"),
-            "input_schema": {
-                "type": "object",
-                "properties": {"message": {"type": "string", "description": "Task description"}},
-                "required": ["message"],
-            },
-        })
-        a2a_map[tname] = ag
-
-    # Inline Python functions as callable tools
-    for fn in functions:
-        fn_name = fn.get("name", "")
-        if not fn_name:
-            continue
-        tools.append({
-            "name": fn_name,
-            "description": fn.get("description", f"Function {fn_name}"),
-            "input_schema": fn.get("parameters") or {"type": "object"},
-        })
-        fn_map[fn_name] = fn
-
-    messages: list[dict] = [{"role": "user", "content": _json.dumps(input_data)}]
-    in_tokens = out_tokens = 0
-
-    for iteration in range(max_iterations):
-        kwargs: dict = {
-            "model": model, "max_tokens": 4096,
-            "system": system_prompt, "messages": messages,
-        }
-        if tools:
-            kwargs["tools"] = tools
-            # Force at least one tool call on the first turn so the orchestrator
-            # always delegates rather than answering from its own knowledge.
-            if iteration == 0:
-                kwargs["tool_choice"] = {"type": "any"}
-
-        resp = await client.messages.create(**kwargs)
-        in_tokens += resp.usage.input_tokens
-        out_tokens += resp.usage.output_tokens
-
-        if resp.stop_reason == "end_turn":
-            texts = [b.text for b in resp.content if hasattr(b, "text")]
-            text = texts[-1] if texts else ""
-            try:
-                data = _json.loads(text)
-            except Exception:
-                data = {"result": text}
-            return {**data, "usage": {"input_tokens": in_tokens, "output_tokens": out_tokens}}
-
-        if resp.stop_reason != "tool_use":
-            break
-
-        messages.append({"role": "assistant", "content": resp.content})
-        tool_use_blocks = [b for b in resp.content if b.type == "tool_use"]
-
-        if parallel:
-            # All tool calls in this turn run concurrently
-            tool_results = await asyncio.gather(*[
-                _dispatch_tool_call(tu, mcp_tool_map, a2a_map, fn_map, _json, ctx)
-                for tu in tool_use_blocks
-            ])
-            tool_results = list(tool_results)
-        else:
-            # Sequential — one at a time (default; safe for dependent calls)
-            tool_results = []
-            for tu in tool_use_blocks:
-                tool_results.append(
-                    await _dispatch_tool_call(tu, mcp_tool_map, a2a_map, fn_map, _json, ctx)
-                )
-
-        messages.append({"role": "user", "content": tool_results})
-
-    return {"result": None, "error": "max_iterations_reached",
-            "usage": {"input_tokens": in_tokens, "output_tokens": out_tokens}}
-
-
-# ── LangGraph ─────────────────────────────────────────────────────────────────
-
-async def _run_langgraph(config: dict, input_data: dict) -> dict:
-    try:
-        from langchain_anthropic import ChatAnthropic
-        from langchain_mcp_adapters.client import MultiServerMCPClient
-        from langgraph.prebuilt import create_react_agent
-    except ImportError:
-        return {"error": "langgraph / langchain-anthropic / langchain-mcp-adapters not installed", "result": None}
-
-    import json as _json
-    from app.config import get_settings
-
-    settings = get_settings()
-    api_key = config.get("api_key") or settings.anthropic_api_key
-
-    resolved = config.get("resolved_tools") or {}
-    mcp_servers = (resolved.get("mcp_servers") or []) + (config.get("mcp_servers") or [])
-    mcp_config = {s["name"]: {"url": s["url"], "transport": s.get("transport", "http")} for s in mcp_servers}
-
-    llm_kwargs = {"model": config.get("model", "claude-opus-4-7")}
-    if api_key:
-        llm_kwargs["anthropic_api_key"] = api_key
-    llm = ChatAnthropic(**llm_kwargs)
-    async with MultiServerMCPClient(mcp_config) as mcp:
-        agent = create_react_agent(llm, mcp.get_tools())
-        result = await agent.ainvoke({"messages": [{"role": "user", "content": _json.dumps(input_data)}]})
-        last = result["messages"][-1]
-        content = last.content if hasattr(last, "content") else str(last)
-        try:
-            return _json.loads(content)
-        except Exception:
-            return {"result": content}
+    """Kept for backwards compat — delegates to ADK."""
+    return await _run_adk(config, input_data, ctx)
 
 
 # ── Google ADK ────────────────────────────────────────────────────────────────
