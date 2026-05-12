@@ -109,83 +109,7 @@ class OrchestratorAgentNode(NodeDefinition):
         return result
 
 
-# ── Shared MCP / A2A helpers ─────────────────────────────────────────────────
-
-def _mcp_url(base_url: str) -> str:
-    """Return the correct MCP endpoint URL.
-    FastMCP Streamable HTTP mounts at /mcp; plain MCP servers use the base URL."""
-    url = base_url.rstrip("/")
-    if not url.endswith("/mcp"):
-        return url + "/mcp"
-    return url
-
-
-async def _mcp_init_session(http, url: str, extra_headers: dict) -> str | None:
-    """Initialize a FastMCP Streamable HTTP session and return the session ID."""
-    try:
-        r = await http.post(
-            url,
-            json={"jsonrpc": "2.0", "id": 0, "method": "initialize",
-                  "params": {"protocolVersion": "2024-11-05",
-                             "capabilities": {},
-                             "clientInfo": {"name": "nocode-platform", "version": "1.0"}}},
-            headers={"Accept": "application/json, text/event-stream", **extra_headers},
-        )
-        return r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id")
-    except Exception:
-        return None
-
-
-def _mcp_headers(extra: dict, session_id: str | None) -> dict:
-    h = {"Accept": "application/json, text/event-stream", **extra}
-    if session_id:
-        h["Mcp-Session-Id"] = session_id
-    return h
-
-
-def _mcp_parse_tools_list(r) -> list:
-    """Parse tools from either SSE event-stream or plain JSON response."""
-    import json as _j
-    text = r.text if hasattr(r, "text") else ""
-    # SSE: lines like "data: {...}"
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("data:"):
-            payload = line[5:].strip()
-            try:
-                obj = _j.loads(payload)
-                tools = obj.get("result", {}).get("tools", [])
-                if isinstance(tools, list):
-                    return tools
-            except Exception:
-                pass
-    # Plain JSON fallback
-    try:
-        return r.json().get("result", {}).get("tools", [])
-    except Exception:
-        return []
-
-
-def _mcp_parse_call_result(r):
-    """Parse a tools/call result from SSE or plain JSON response."""
-    import json as _j
-    text = r.text if hasattr(r, "text") else ""
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("data:"):
-            payload = line[5:].strip()
-            try:
-                obj = _j.loads(payload)
-                result = obj.get("result")
-                if result is not None:
-                    return result
-            except Exception:
-                pass
-    try:
-        return r.json().get("result", r.json())
-    except Exception:
-        return {"error": "Could not parse MCP response"}
-
+# ── A2A helpers ──────────────────────────────────────────────────────────────
 
 async def _a2a_call(http, endpoint: str, message: str, auth_token: str = "") -> dict:
     """Call an A2A agent using the A2A JSON-RPC protocol (message/send)."""
@@ -330,48 +254,67 @@ async def _run_adk(config: dict, input_data: dict, ctx=None) -> dict:
 
     adk_tools: list = []
 
-    # ── MCP servers — discover tools then wrap each as a FunctionTool ─────────
-    async with httpx.AsyncClient(timeout=15) as http:
-        for srv in mcp_servers:
+    # ── MCP servers — discover tools via official MCP client ──────────────────
+    try:
+        from mcp.client.streamable_http import streamablehttp_client
+        from mcp import ClientSession as _McpSession
+        _mcp_ok = True
+    except ImportError:
+        _mcp_ok = False
+
+    def _make_mcp_tool(srv_cfg: dict, tool, mcp_url: str, extra_hdrs: dict):
+        """Wrap a single MCP tool as an ADK FunctionTool using the MCP client."""
+        nid = srv_cfg.get("node_id")
+        ntype = srv_cfg.get("node_type", "TOOL")
+        tname = tool.name
+        desc = tool.description or f"MCP tool {tname}"
+
+        async def mcp_fn(**kwargs) -> dict:
+            await _log_tool_node(ctx, nid, ntype, "running")
             try:
-                mcp_base = _mcp_url(srv["url"])
-                extra_hdrs = srv.get("auth") or {}
-                sid = await _mcp_init_session(http, mcp_base, extra_hdrs)
-                resp = await http.post(
-                    mcp_base,
-                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-                    headers=_mcp_headers(extra_hdrs, sid),
-                )
-                for tool in _mcp_parse_tools_list(resp):
-                    def _make_mcp_tool(srv_cfg: dict, tool_name: str, full_name: str, desc: str):
-                        nid = srv_cfg.get("node_id")
-                        ntype = srv_cfg.get("node_type", "TOOL")
-                        async def mcp_fn(**kwargs) -> dict:
-                            await _log_tool_node(ctx, nid, ntype, "running")
-                            try:
-                                base = _mcp_url(srv_cfg["url"])
-                                eh = srv_cfg.get("auth") or {}
-                                async with httpx.AsyncClient(timeout=30) as h:
-                                    s = await _mcp_init_session(h, base, eh)
-                                    r = await h.post(
-                                        base,
-                                        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                              "params": {"name": tool_name, "arguments": kwargs}},
-                                        headers=_mcp_headers(eh, s),
-                                    )
-                                result = _mcp_parse_call_result(r)
-                                await _log_tool_node(ctx, nid, ntype, "success")
-                                return result
-                            except Exception as exc:
-                                await _log_tool_node(ctx, nid, ntype, "failed", str(exc))
-                                return {"error": str(exc)}
-                        mcp_fn.__name__ = full_name.replace("-", "_").replace(".", "_")
-                        mcp_fn.__doc__ = desc or f"MCP tool {full_name}"
-                        return FunctionTool(mcp_fn)
-                    full = f"{srv['name']}__{tool['name']}"
-                    adk_tools.append(_make_mcp_tool(srv, tool["name"], full, tool.get("description", "")))
-            except Exception:
-                pass
+                async with streamablehttp_client(
+                    mcp_url, headers=extra_hdrs or None, timeout=30
+                ) as (r, w, _):
+                    async with _McpSession(r, w) as s:
+                        await s.initialize()
+                        res = await s.call_tool(tname, arguments=kwargs or None)
+                if res.isError:
+                    raise RuntimeError(
+                        "; ".join(c.text for c in res.content if hasattr(c, "text"))
+                        or "MCP tool returned isError=True"
+                    )
+                await _log_tool_node(ctx, nid, ntype, "success")
+                # Prefer structured content (dict); fall back to joined text parts
+                if res.structuredContent:
+                    return res.structuredContent
+                texts = [c.text for c in res.content if hasattr(c, "text")]
+                return {"result": "\n".join(texts)} if texts else {"result": str(res.content)}
+            except Exception as exc:
+                await _log_tool_node(ctx, nid, ntype, "failed", str(exc))
+                return {"error": str(exc)}
+
+        fn_name = f"{srv_cfg['name']}__{tname}".replace("-", "_").replace(".", "_")
+        mcp_fn.__name__ = fn_name
+        mcp_fn.__doc__ = desc
+        return FunctionTool(mcp_fn)
+
+    for srv in mcp_servers:
+        if not _mcp_ok:
+            break
+        raw = srv["url"].rstrip("/")
+        mcp_url = raw if raw.endswith("/mcp") else raw + "/mcp"
+        extra_hdrs = srv.get("auth") or {}
+        try:
+            async with streamablehttp_client(
+                mcp_url, headers=extra_hdrs or None, timeout=15
+            ) as (read, write, _):
+                async with _McpSession(read, write) as session:
+                    await session.initialize()
+                    tools_result = await session.list_tools()
+                    for tool in tools_result.tools:
+                        adk_tools.append(_make_mcp_tool(srv, tool, mcp_url, extra_hdrs))
+        except Exception:
+            pass
 
     # ── A2A remote agents as callable tools ───────────────────────────────────
     for ag in a2a_agents:
