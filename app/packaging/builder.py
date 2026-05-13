@@ -80,13 +80,18 @@ def _build_requirements(ir_dict: dict) -> str:
     # google-adk and google-genai both require fastapi>=0.115.0
     needs_adk_fastapi = has_agentic or has_vertex_model
     reqs = _BASE_REQUIREMENTS_ADK if needs_adk_fastapi else _BASE_REQUIREMENTS
-    if types & {"AGENT", "MODEL", "DATASOURCE", "TOOL", "ORCHESTRATOR_AGENT", "REMOTE_AGENT"}:
+    if types & {"AGENT", "MODEL", "ORCHESTRATOR_AGENT", "REMOTE_AGENT"}:
         reqs += "httpx>=0.28.1,<1.0.0\n"
     if has_agentic:
         reqs += "google-adk>=1.0.0\n"
-    elif has_vertex_model:
-        # google-adk isn't needed but google-genai is required for Vertex AI MODEL nodes
-        reqs += "google-genai>=1.14.0\n"
+        # google-adk already pulls in mcp, but pin explicitly so uv doesn't pick an incompatible version
+        reqs += "mcp>=1.0.0\n"
+    else:
+        if has_vertex_model:
+            reqs += "google-genai>=1.14.0\n"
+        if types & {"DATASOURCE", "TOOL"}:
+            # standalone MCP client — no google-adk, so mcp must be listed directly
+            reqs += "mcp>=1.0.0\n"
     return reqs
 
 

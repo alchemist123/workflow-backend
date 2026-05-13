@@ -33,68 +33,7 @@ _SAFE_GLOBALS: dict = {
 
 # ADK helpers for all agentic nodes — inlined in standalone main.py, no app.* imports
 _ORCHESTRATOR_HELPERS = r'''
-# ── MCP / A2A protocol helpers ────────────────────────────────────────────────
-
-def _orch_mcp_url(base_url: str) -> str:
-    url = base_url.rstrip("/")
-    if not url.endswith("/mcp"):
-        return url + "/mcp"
-    return url
-
-async def _orch_mcp_init_session(http, url: str, extra_headers: dict):
-    try:
-        r = await http.post(
-            url,
-            json={"jsonrpc": "2.0", "id": 0, "method": "initialize",
-                  "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                             "clientInfo": {"name": "standalone-workflow", "version": "1.0"}}},
-            headers={"Accept": "application/json, text/event-stream", **extra_headers},
-        )
-        return r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id")
-    except Exception:
-        return None
-
-def _orch_mcp_headers(extra: dict, session_id) -> dict:
-    h = {"Accept": "application/json, text/event-stream", **extra}
-    if session_id:
-        h["Mcp-Session-Id"] = session_id
-    return h
-
-def _orch_mcp_parse_tools(r) -> list:
-    text = r.text if hasattr(r, "text") else ""
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("data:"):
-            payload = line[5:].strip()
-            try:
-                obj = json.loads(payload)
-                tools = obj.get("result", {}).get("tools", [])
-                if isinstance(tools, list):
-                    return tools
-            except Exception:
-                pass
-    try:
-        return r.json().get("result", {}).get("tools", [])
-    except Exception:
-        return []
-
-def _orch_mcp_parse_result(r):
-    text = r.text if hasattr(r, "text") else ""
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("data:"):
-            payload = line[5:].strip()
-            try:
-                obj = json.loads(payload)
-                result = obj.get("result")
-                if result is not None:
-                    return result
-            except Exception:
-                pass
-    try:
-        return r.json().get("result", r.json())
-    except Exception:
-        return {"error": "Could not parse MCP response"}
+# ── A2A protocol helper ───────────────────────────────────────────────────────
 
 async def _orch_a2a_call(http, endpoint: str, message: str, auth_token: str = "") -> dict:
     import uuid as _uu
@@ -128,46 +67,53 @@ async def _orch_a2a_call(http, endpoint: str, message: str, auth_token: str = ""
     return result
 
 
-# ── Shared tool-collection helper (MCP / A2A) ─────────────────────────────────
+# ── Shared tool-collection helper (MCP client / A2A) ─────────────────────────
 
 async def _collect_tools_adk(mcp_servers, a2a_agents, functions) -> list:
     """Return list of ADK FunctionTool objects from MCP servers and A2A agents."""
     from google.adk.tools import FunctionTool
+    from mcp.client.streamable_http import streamablehttp_client as _shttp
+    from mcp import ClientSession as _McpSess
     adk_tools: list = []
 
-    async with httpx.AsyncClient(timeout=15) as http:
-        for srv in mcp_servers:
+    def _make_mcp_tool(srv_cfg, tool, mcp_url, extra_hdrs):
+        tname = tool.name
+        desc = tool.description or f"MCP tool {tname}"
+        async def mcp_fn(**kwargs) -> dict:
             try:
-                mcp_base = _orch_mcp_url(srv["url"])
-                extra_hdrs = srv.get("auth") or {}
-                sid = await _orch_mcp_init_session(http, mcp_base, extra_hdrs)
-                resp = await http.post(
-                    mcp_base,
-                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-                    headers=_orch_mcp_headers(extra_hdrs, sid),
-                )
-                for tool in _orch_mcp_parse_tools(resp):
-                    def _make_mcp(srv_cfg, tn, fn, d):
-                        async def mcp_fn(**kwargs) -> dict:
-                            try:
-                                base = _orch_mcp_url(srv_cfg["url"])
-                                eh = srv_cfg.get("auth") or {}
-                                async with httpx.AsyncClient(timeout=30) as h:
-                                    sid2 = await _orch_mcp_init_session(h, base, eh)
-                                    r = await h.post(base,
-                                        json={"jsonrpc":"2.0","id":1,"method":"tools/call",
-                                              "params":{"name":tn,"arguments":kwargs}},
-                                        headers=_orch_mcp_headers(eh, sid2))
-                                return _orch_mcp_parse_result(r)
-                            except Exception as exc:
-                                return {"error": str(exc)}
-                        mcp_fn.__name__ = fn.replace("-","_").replace(".","_")
-                        mcp_fn.__doc__ = d or f"MCP tool {fn}"
-                        return FunctionTool(mcp_fn)
-                    full = f"{srv['name']}__{tool['name']}"
-                    adk_tools.append(_make_mcp(srv, tool["name"], full, tool.get("description","")))
-            except Exception:
-                pass
+                async with _shttp(mcp_url, headers=extra_hdrs or None, timeout=30) as (r, w, _):
+                    async with _McpSess(r, w) as s:
+                        await s.initialize()
+                        res = await s.call_tool(tname, arguments=kwargs or None)
+                if res.isError:
+                    raise RuntimeError(
+                        "; ".join(c.text for c in res.content if hasattr(c, "text"))
+                        or "MCP tool returned isError=True"
+                    )
+                if res.structuredContent:
+                    return res.structuredContent
+                texts = [c.text for c in res.content if hasattr(c, "text")]
+                return {"result": "\n".join(texts)} if texts else {"result": str(res.content)}
+            except Exception as exc:
+                return {"error": str(exc)}
+        fn_name = f"{srv_cfg['name']}__{tname}".replace("-", "_").replace(".", "_")
+        mcp_fn.__name__ = fn_name
+        mcp_fn.__doc__ = desc
+        return FunctionTool(mcp_fn)
+
+    for srv in mcp_servers:
+        raw = srv["url"].rstrip("/")
+        mcp_url = raw if raw.endswith("/mcp") else raw + "/mcp"
+        extra_hdrs = srv.get("auth") or {}
+        try:
+            async with _shttp(mcp_url, headers=extra_hdrs or None, timeout=15) as (read, write, _):
+                async with _McpSess(read, write) as session:
+                    await session.initialize()
+                    tools_result = await session.list_tools()
+                    for tool in tools_result.tools:
+                        adk_tools.append(_make_mcp_tool(srv, tool, mcp_url, extra_hdrs))
+        except Exception:
+            pass
 
     for ag in a2a_agents:
         def _make_a2a_ag(agent_cfg):
@@ -374,9 +320,9 @@ def generate_standalone_app(ir_dict: dict, workflow_name: str = "workflow") -> s
     )
     has_agent        = any(n.get("node_type") == "AGENT"              for n in nodes.values())
     has_model        = any(n.get("node_type") == "MODEL"              for n in nodes.values())
-    has_mcp          = any(n.get("node_type") in ("DATASOURCE", "TOOL") for n in nodes.values())
     has_orchestrator = any(n.get("node_type") == "ORCHESTRATOR_AGENT" for n in nodes.values())
-    needs_httpx = has_agent or has_model or has_mcp or has_orchestrator
+    # DATASOURCE/TOOL use the mcp client (inline import) — no top-level httpx needed for them
+    needs_httpx = has_agent or has_model or has_orchestrator
 
     parts: list[str] = []
 
@@ -616,18 +562,27 @@ def _gen_executor(ir_dict: dict) -> str:
                 L.append("            state = _orch_result")
             L.append(f"            _next = {nxt0!r}")
 
-        # ── Datasource / Tool (MCP) ────────────────────────────
+        # ── Datasource / Tool (MCP client) ────────────────────────
         elif nt in ("DATASOURCE", "TOOL"):
-            mcp_url  = cfg.get("mcp_url", "")
+            raw_url   = cfg.get("mcp_url", "").rstrip("/")
+            mcp_url   = raw_url if raw_url.endswith("/mcp") else raw_url + "/mcp"
             tool_name = cfg.get("tool_name", "")
             static_args = cfg.get("tool_args") or {}
             L += [
-                f"            async with httpx.AsyncClient(timeout=30) as _hc:",
-                f"                _args = {{**{static_args!r}, **state}}",
-                f"                _mr = await _hc.post({mcp_url!r},",
-                f"                    json={{'jsonrpc':'2.0','id':1,'method':'tools/call',",
-                f"                          'params':{{'name':{tool_name!r},'arguments':_args}}}})",
-                "                state = _mr.json().get('result', _mr.json())",
+                "            from mcp.client.streamable_http import streamablehttp_client as _shttp",
+                "            from mcp import ClientSession as _McpSess",
+                f"            _args = {{**{static_args!r}, **state}}",
+                f"            async with _shttp({mcp_url!r}, timeout=30) as (_mr, _mw, _):",
+                "                async with _McpSess(_mr, _mw) as _ms:",
+                "                    await _ms.initialize()",
+                f"                    _mres = await _ms.call_tool({tool_name!r}, arguments=_args or None)",
+                "            if _mres.isError:",
+                "                state = {'error': '; '.join(c.text for c in _mres.content if hasattr(c, 'text')) or 'tool error'}",
+                "            elif _mres.structuredContent:",
+                "                state = _mres.structuredContent",
+                "            else:",
+                "                _texts = [c.text for c in _mres.content if hasattr(c, 'text')]",
+                "                state = {'result': chr(10).join(_texts)} if _texts else {'result': str(_mres.content)}",
                 f"            _next = {nxt0!r}",
             ]
 
