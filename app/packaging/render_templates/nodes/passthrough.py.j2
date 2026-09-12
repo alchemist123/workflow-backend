@@ -1,0 +1,19 @@
+{% include "nodes/_header.j2" %}
+from google.adk import Event
+from google.adk.agents.context import Context
+from google.adk.workflow import node
+
+from core.logging import node_logger
+from nodes.base import NODE_KWARGS
+
+NODE_ID = {{ node.name | tojson }}
+
+log = node_logger(NODE_ID)
+
+
+@node(name=NODE_ID, **NODE_KWARGS({{ node_kwargs }}))
+async def {{ node.name }}(ctx: Context, node_input=None):
+    # {{ node.node_type }} has no generated behaviour yet, so it passes its
+    # input through unchanged. Packaging refuses workflows containing one.
+    log.warning("%s is a placeholder and does nothing", NODE_ID)
+    return Event(output=node_input or {})

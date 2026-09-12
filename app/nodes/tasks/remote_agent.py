@@ -7,6 +7,9 @@ from app.nodes.base import NodeDefinition, PaletteMetadata
 @dataclass
 class RemoteAgentNode(NodeDefinition):
     node_type: str = "REMOTE_AGENT"
+    provides_tool: bool = True
+    secret_config_keys: frozenset[str] = frozenset({'auth_token', 'endpoint'})
+    supports_on_error_continue: bool = True
     version: str = "1"
     palette: PaletteMetadata = None
     config_schema: dict = None
@@ -49,17 +52,3 @@ class RemoteAgentNode(NodeDefinition):
         self.output_schema = {"type": "object"}
         self.output_handles = ["output", "error"]
 
-    async def execute(self, node_config: dict, input_data: dict, context: Any) -> dict:
-        """Standalone execution: forward input as a message to the A2A endpoint."""
-        import httpx
-        import json as _json
-
-        endpoint = node_config.get("endpoint", "").rstrip("/")
-        auth_token = node_config.get("auth_token", "")
-        headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
-        message = input_data.get("message", _json.dumps(input_data))
-
-        async with httpx.AsyncClient(timeout=60) as http:
-            resp = await http.post(endpoint, json={"message": message}, headers=headers)
-            resp.raise_for_status()
-            return resp.json()

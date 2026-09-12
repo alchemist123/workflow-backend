@@ -2,13 +2,20 @@
 from dataclasses import dataclass, field
 from typing import Any
 from app.schemas.canvas import CanvasPayload
-from app.nodes.registry import get_node_definition
+from app.nodes.agent_io import fields_to_json_schema
+from app.nodes.registry import (
+    BRANCH_NODE_TYPES,
+    TOOL_CONSUMER_TYPES,
+    TOOL_GROUP_TYPES,
+    TOOL_PROVIDER_TYPES,
+    get_node_definition,
+)
 
 
 @dataclass
 class IRNode:
     id: str
-    kind: str                    # e.g. "trigger.http", "task.agent"
+    kind: str                    # e.g. "trigger.a2a_start", "task.agent"
     node_type: str               # original type string
     config: dict[str, Any]
     policies: dict[str, Any]
@@ -67,15 +74,15 @@ class IR:
 
 
 _KIND_MAP = {
-    "HTTP_TRIGGER": "trigger.http",
-    "SCHEDULE_TRIGGER": "trigger.schedule",
-    "WEBHOOK_TRIGGER": "trigger.webhook",
-    "QUEUE_TRIGGER": "trigger.queue",
+    # A2A_START is the only entry kind. The old trigger kinds (trigger.http,
+    # trigger.schedule, trigger.webhook, trigger.queue) were removed when
+    # packaging moved to ADK graph workflows served over A2A.
+    "A2A_START": "trigger.a2a_start",
     "AGENT": "task.agent",
     "ORCHESTRATOR_AGENT": "task.orchestrator_agent",
     "REMOTE_AGENT": "task.remote_agent",
     "FUNCTION": "task.function",
-    "MODEL": "task.model",
+    "LLM_AGENT": "agent.llm",
     "TOOL": "task.tool",
     "CONDITION": "task.condition",
     "LOOP": "task.loop",
@@ -86,27 +93,31 @@ _KIND_MAP = {
     "SUBWORKFLOW": "task.subworkflow",
     "PARALLEL_FORK": "task.parallel_fork",
     "MERGE": "task.merge",
+    "SEQUENTIAL_AGENT": "tools.sequential",
+    "PARALLEL_AGENT": "tools.parallel",
 }
 
-# Node types that can be wired as tools into ORCHESTRATOR_AGENT
-_TOOL_PROVIDER_TYPES = {"TOOL", "DATASOURCE", "REMOTE_AGENT", "FUNCTION"}
+# Which node types can be wired into a "tools" handle, and which types have
+# one, are derived from the node declarations in app/nodes/registry.py.
 
 
 def compile_to_ir(canvas: CanvasPayload, version_id: str) -> IR:
     """Convert validated canvas JSON into a normalized IR."""
     nodes_by_id = {n.id: n for n in canvas.nodes}
 
-    # Resolve tool-provision edges: TOOL/DATASOURCE/REMOTE_AGENT/FUNCTION → ORCHESTRATOR_AGENT
-    # These use target_handle "tools" and are excluded from the normal execution flow.
-    tool_provision: dict[str, list] = {}   # orchestrator_id -> [source_canvas_nodes]
+    # Resolve tool-provision edges. A provider wired into a consumer's "tools"
+    # handle becomes a tool that consumer may call, and the edge is excluded
+    # from the execution flow. Consumers are the agent types plus the groups —
+    # a group's children arrive on its own tools handle, so this nests.
+    tool_provision: dict[str, list] = {}          # consumer_id -> [source nodes]
     tool_edge_pairs: set[tuple[str, str]] = set()  # (src_id, tgt_id)
 
     for edge in canvas.edges:
         src = nodes_by_id.get(edge.source)
         tgt = nodes_by_id.get(edge.target)
         if (src and tgt
-                and src.type in _TOOL_PROVIDER_TYPES
-                and tgt.type == "ORCHESTRATOR_AGENT"
+                and src.type in TOOL_PROVIDER_TYPES
+                and tgt.type in TOOL_CONSUMER_TYPES
                 and edge.target_handle == "tools"):
             tool_provision.setdefault(edge.target, []).append(src)
             tool_edge_pairs.add((edge.source, edge.target))
@@ -124,11 +135,10 @@ def compile_to_ir(canvas: CanvasPayload, version_id: str) -> IR:
         defn = get_node_definition(node.type)
         kind = _KIND_MAP.get(node.type, f"unknown.{node.type.lower()}")
 
-        # CONDITION, PARALLEL_FORK, and LOOP use named branches — engine reads branches dict.
-        # All other nodes: every outbound edge goes into next[].
-        _BRANCH_NODES = {"CONDITION", "PARALLEL_FORK", "LOOP"}
+        # A branch node's outbound edges are keyed by handle; everything else
+        # puts every outbound edge into next[].
         branches: dict[str, list[str]] = {}
-        if node.type in _BRANCH_NODES:
+        if node.type in BRANCH_NODE_TYPES:
             for (tgt, handle) in adjacency[node.id]:
                 branches.setdefault(handle, []).append(tgt)
             next_nodes: list[str] = []
@@ -136,36 +146,9 @@ def compile_to_ir(canvas: CanvasPayload, version_id: str) -> IR:
             # Include ALL handles (output, error, approved, rejected, …)
             next_nodes = [tgt for (tgt, _handle) in adjacency[node.id]]
 
-        # For ORCHESTRATOR_AGENT: embed resolved_tools from connected tool-provider nodes
-        if node.type == "ORCHESTRATOR_AGENT":
-            resolved: dict = {"mcp_servers": [], "a2a_agents": [], "functions": []}
-            for src in tool_provision.get(node.id, []):
-                if src.type in ("TOOL", "DATASOURCE"):
-                    resolved["mcp_servers"].append({
-                        "name": src.metadata.title or src.id,
-                        "url": src.config.get("mcp_url", ""),
-                        "transport": src.config.get("transport", "http"),
-                        "node_id": src.id,
-                        "node_type": src.type,
-                    })
-                elif src.type == "REMOTE_AGENT":
-                    resolved["a2a_agents"].append({
-                        "name": src.config.get("name") or src.metadata.title or src.id,
-                        "endpoint": src.config.get("endpoint", ""),
-                        "description": src.config.get("description", ""),
-                        "auth_token": src.config.get("auth_token", ""),
-                        "node_id": src.id,
-                        "node_type": src.type,
-                    })
-                elif src.type == "FUNCTION":
-                    resolved["functions"].append({
-                        "name": src.config.get("name") or src.metadata.title or src.id,
-                        "description": src.config.get("description", ""),
-                        "parameters": src.config.get("parameters") or {"type": "object", "properties": {}},
-                        "code": src.config.get("code", "result = data"),
-                        "node_id": src.id,
-                        "node_type": src.type,
-                    })
+        # Any tool consumer gets resolved_tools embedded in its config.
+        if node.type in TOOL_CONSUMER_TYPES:
+            resolved = _resolve_tools(node.id, tool_provision, set())
             config = {**node.config, "resolved_tools": resolved}
         else:
             config = node.config
@@ -191,3 +174,170 @@ def compile_to_ir(canvas: CanvasPayload, version_id: str) -> IR:
             entrypoints.append(node.id)
 
     return IR(workflow_version_id=version_id, entrypoints=entrypoints, nodes=ir_nodes)
+
+
+def _tool_entry(
+    src,
+    tool_provision: dict[str, list] | None = None,
+    seen: set[str] | None = None,
+) -> dict | None:
+    """One leaf provider, as the shape the package's tool builders consume.
+
+    `tool_provision` and `seen` are only needed for LLM_AGENT, which is a leaf
+    from its consumer's point of view but a consumer in its own right: a
+    sub-agent may have its own MCP tools, remote agents and groups.
+    """
+    if src.type == "LLM_AGENT":
+        return _agent_entry(src, tool_provision or {}, seen or set())
+
+    if src.type in ("TOOL", "DATASOURCE"):
+        return {
+            "kind": "mcp",
+            "name": src.metadata.title or src.id,
+            "url": src.config.get("mcp_url", ""),
+            "auth_token": src.config.get("auth_token", ""),
+            "transport": src.config.get("transport", "http"),
+            "tool_name": src.config.get("tool_name", ""),
+            "node_id": src.id,
+            "node_type": src.type,
+        }
+    if src.type == "REMOTE_AGENT":
+        return {
+            "kind": "a2a",
+            "name": src.config.get("name") or src.metadata.title or src.id,
+            "endpoint": src.config.get("endpoint", ""),
+            "description": src.config.get("description", ""),
+            "auth_token": src.config.get("auth_token", ""),
+            "node_id": src.id,
+            "node_type": src.type,
+        }
+    if src.type == "FUNCTION":
+        return {
+            "kind": "function",
+            "name": src.config.get("name") or src.metadata.title or src.id,
+            "description": src.config.get("description", ""),
+            "parameters": src.config.get("parameters") or {"type": "object", "properties": {}},
+            "code": src.config.get("code", "result = data"),
+            "node_id": src.id,
+            "node_type": src.type,
+        }
+    return None
+
+
+def _agent_entry(
+    src,
+    tool_provision: dict[str, list],
+    seen: set[str],
+) -> dict[str, Any]:
+    """An LLM_AGENT wired into a consumer, as a sub-agent.
+
+    Carries its own resolved tools, so a sub-agent with MCP tools of its own
+    generates correctly. `input_schema` / `output_schema` are converted from the
+    canvas field lists here, because the package needs JSON Schema, not the
+    authoring shape.
+    """
+    config = src.config or {}
+    return {
+        "kind": "agent",
+        "name": config.get("name") or src.metadata.title or src.id,
+        "description": config.get("description", ""),
+        "instruction": config.get("system_prompt", ""),
+        "provider": config.get("provider", "google"),
+        "model": config.get("model", ""),
+        "temperature": config.get("temperature"),
+        "max_tokens": config.get("max_tokens"),
+        "input_schema": fields_to_json_schema(config.get("input_structure")),
+        "output_schema": fields_to_json_schema(config.get("output_structure")),
+        "output_key": config.get("output_key", ""),
+        # A sub-agent is itself a tool consumer.
+        "tools": _resolve_tools(src.id, tool_provision, seen),
+        "node_id": src.id,
+        "node_type": src.type,
+    }
+
+
+def _resolve_tools(
+    consumer_id: str,
+    tool_provision: dict[str, list],
+    seen: set[str],
+) -> dict[str, Any]:
+    """The tools wired into one consumer, recursing through nested groups.
+
+    Returns the three flat leaf buckets the package's tool builders already
+    understand, plus `groups`. A group's `children` is one ordered list in which
+    a nested group appears as an entry of its own, so order is preserved even
+    when a group mixes leaf tools and sub-groups.
+
+    `seen` guards against a cycle in the tool wiring, which the flow-graph cycle
+    check cannot see because tool edges are excluded from that graph.
+    """
+    resolved: dict[str, Any] = {
+        "mcp_servers": [],
+        "a2a_agents": [],
+        "functions": [],
+        "groups": [],
+        "agents": [],
+    }
+    if consumer_id in seen:
+        return resolved
+    seen = seen | {consumer_id}
+
+    for src in tool_provision.get(consumer_id, []):
+        if src.type in TOOL_GROUP_TYPES:
+            resolved["groups"].append(_resolve_group(src, tool_provision, seen))
+            continue
+
+        entry = _tool_entry(src, tool_provision, seen)
+        if entry is None:
+            continue
+        bucket = {
+            "mcp": "mcp_servers",
+            "a2a": "a2a_agents",
+            "function": "functions",
+            "agent": "agents",
+        }[entry["kind"]]
+        resolved[bucket].append(entry)
+
+    return resolved
+
+
+def _resolve_group(
+    group,
+    tool_provision: dict[str, list],
+    seen: set[str],
+) -> dict[str, Any]:
+    """One tool group, with its children in execution order."""
+    children_nodes = tool_provision.get(group.id, [])
+
+    # `order` lists canvas node ids. Anything connected but unlisted runs last,
+    # in canvas order, so a half-filled order still produces a usable group.
+    requested = [str(x) for x in (group.config.get("order") or [])]
+    position = {node_id: index for index, node_id in enumerate(requested)}
+    ordered = sorted(
+        children_nodes, key=lambda child: position.get(child.id, len(requested))
+    )
+
+    children: list[dict[str, Any]] = []
+    for child in ordered:
+        if child.type in TOOL_GROUP_TYPES:
+            if child.id in seen:
+                continue  # the validator reports the cycle
+            children.append(_resolve_group(child, tool_provision, seen | {group.id}))
+            continue
+        entry = _tool_entry(child, tool_provision, seen | {group.id})
+        if entry is not None:
+            children.append(entry)
+
+    return {
+        "kind": "group",
+        "name": group.config.get("name") or group.metadata.title or group.id,
+        "mode": "sequential" if group.type == "SEQUENTIAL_AGENT" else "parallel",
+        "description": group.config.get("description", ""),
+        "stop_on_error": group.config.get(
+            "stop_on_error", group.type == "SEQUENTIAL_AGENT"
+        ),
+        "max_concurrency": group.config.get("max_concurrency", 0),
+        "children": children,
+        "node_id": group.id,
+        "node_type": group.type,
+    }

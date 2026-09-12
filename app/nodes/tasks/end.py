@@ -42,8 +42,3 @@ class EndNode(NodeDefinition):
         self.output_schema = {"type": "object"}
         self.output_handles = []
 
-    async def execute(self, node_config: dict, input_data: dict, context: Any) -> dict:
-        mapping = node_config.get("output_mapping", {})
-        if mapping:
-            return {k: input_data.get(v, None) for k, v in mapping.items()}
-        return input_data

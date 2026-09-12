@@ -1,0 +1,240 @@
+{% include "nodes/_header.j2" %}
+import json
+
+from google.adk import Event
+from google.adk.agents.context import Context
+from google.adk.workflow import node
+
+from core.config import settings
+from core.logging import node_logger
+from core.state import as_text, merge_state
+from nodes.base import NODE_KWARGS, node_error
+
+NODE_ID = {{ node.name | tojson }}
+ON_ERROR = {{ node.on_error | tojson }}
+
+SYSTEM_PROMPT = {{ system_prompt | tojson }}
+MODEL_FALLBACK = {{ model | tojson }}
+MAX_TOKENS = {{ max_tokens }}
+TEMPERATURE = {{ temperature }}
+{% if prompt_template %}
+# A Jinja2 template rendered against the payload. Without one the whole payload
+# is sent as JSON.
+PROMPT_TEMPLATE = {{ prompt_template | tojson }}
+{% else %}
+PROMPT_TEMPLATE = ""
+{% endif %}
+{% if output_schema %}
+
+# The output structure declared on the canvas. ADK requests
+# `response_mime_type=application/json` with this schema, so the model is
+# constrained to reply in exactly this shape.
+OUTPUT_SCHEMA: dict = {{ output_schema | pyliteral }}
+{% else %}
+OUTPUT_SCHEMA: dict = {}
+{% endif %}
+{% if input_schema %}
+
+# Declared for the case where this node is *also* wired into another agent's
+# tools handle. ADK only consults `input_schema` when the agent is called as a
+# tool, so running here in the flow it has no effect.
+INPUT_SCHEMA: dict = {{ input_schema | pyliteral }}
+{% else %}
+INPUT_SCHEMA: dict = {}
+{% endif %}
+OUTPUT_KEY = {{ structure_output_key | tojson }}
+{% if has_tools %}
+
+# Wired into this node's tools handle on the canvas. With any of these the node
+# runs as an ADK LlmAgent rather than one generate_content call: a model that
+# can call tools needs a loop to call them in. That costs more round trips, and
+# it is driven by what you connected rather than by a setting.
+MCP_SERVERS: list[dict] = {{ mcp_servers | pyliteral }}
+A2A_AGENTS: list[dict] = {{ a2a_agents | pyliteral }}
+INLINE_FUNCTIONS: list[dict] = {{ functions | pyliteral }}
+TOOL_GROUPS: list[dict] = {{ groups | pyliteral }}
+# LLM_AGENT nodes wired in as sub-agents. These are attached via `sub_agents`
+# rather than wrapped as tools: ADK exposes a `single_turn` sub-agent to its
+# parent as a tool by itself, deriving the parameters from its input structure.
+SUB_AGENTS: list[dict] = {{ agents | pyliteral }}
+
+_ENV_FIELDS = {
+    "mcp": ("url", "auth_token"),
+    "a2a": ("endpoint", "auth_token"),
+}
+_agent = None
+
+
+def _resolve_env(entries: list[dict]) -> list[dict]:
+    """Swap each entry's env-key references for the configured values."""
+    resolved: list[dict] = []
+    for entry in entries:
+        copy = dict(entry)
+        kind = copy.get("kind")
+        if kind == "group":
+            copy["children"] = _resolve_env(copy.get("children") or [])
+            resolved.append(copy)
+            continue
+        if kind == "agent":
+            # A sub-agent holds no credential itself, but its own tools do.
+            nested = copy.get("tools") or {}
+            copy["tools"] = {
+                bucket: _resolve_env(nested.get(bucket) or [])
+                for bucket in (
+                    "mcp_servers",
+                    "a2a_agents",
+                    "functions",
+                    "groups",
+                    "agents",
+                )
+            }
+            resolved.append(copy)
+            continue
+        for field in _ENV_FIELDS.get(kind, ()):
+            env_key = entry.get(f"{field}_env")
+            if env_key:
+                copy[field] = settings.env_value(env_key)
+        resolved.append(copy)
+    return resolved
+{% endif %}
+
+log = node_logger(NODE_ID)
+
+
+def _prompt(data: dict) -> str:
+    if PROMPT_TEMPLATE:
+        from jinja2.sandbox import SandboxedEnvironment
+
+        return SandboxedEnvironment().from_string(PROMPT_TEMPLATE).render(**data)
+    return as_text(data)
+
+
+{% if has_tools %}
+async def _build_agent():
+    """An LlmAgent with this node's tools, sub-agents and output structure."""
+    from google.adk.agents import LlmAgent
+
+    from tools.functions import collect_subagents, collect_tools
+
+    tools = await collect_tools(
+        mcp_servers=_resolve_env(MCP_SERVERS),
+        a2a_agents=_resolve_env(A2A_AGENTS),
+        functions=INLINE_FUNCTIONS,
+        groups=_resolve_env(TOOL_GROUPS),
+    )
+    sub_agents = await collect_subagents(_resolve_env(SUB_AGENTS))
+
+    instruction = SYSTEM_PROMPT or "You are a helpful assistant."
+    callable_names = [
+        getattr(getattr(t, "func", None), "__name__", None) or getattr(t, "name", "")
+        for t in tools
+    ] + [a.name for a in sub_agents]
+    callable_names = [n for n in callable_names if n]
+    if callable_names:
+        instruction = (
+            f"{instruction}\n\nYou can call: {', '.join(callable_names)}. "
+            "Use them to answer the request rather than relying on your own "
+            "knowledge, and call one whenever it is relevant."
+        )
+
+    kwargs: dict = {
+        "name": f"{NODE_ID}_llm",
+        "model": settings.LLM_MODEL or MODEL_FALLBACK,
+        "description": SYSTEM_PROMPT,
+        "instruction": instruction,
+    }
+    if tools:
+        kwargs["tools"] = tools
+    if sub_agents:
+        kwargs["sub_agents"] = sub_agents
+    if OUTPUT_SCHEMA:
+        # ADK allows this alongside tools: the tools stay available during the
+        # thought loop and the structure is enforced only on the final answer.
+        kwargs["output_schema"] = OUTPUT_SCHEMA
+    if OUTPUT_KEY:
+        kwargs["output_key"] = OUTPUT_KEY
+
+    log.info(
+        "llm agent built with %d tool(s) and %d sub-agent(s)",
+        len(tools),
+        len(sub_agents),
+    )
+    return LlmAgent(**kwargs)
+
+
+async def _generate(prompt: str) -> str:
+    """Run the agent loop."""
+    import uuid
+
+    from google.adk import Runner
+    from google.adk.sessions import InMemorySessionService
+    from google.genai import types
+
+    global _agent
+    if _agent is None:
+        _agent = await _build_agent()
+
+    sessions = InMemorySessionService()
+    session_id = str(uuid.uuid4())
+    app_name = f"{settings.AGENT_NAME}_{NODE_ID}"
+    await sessions.create_session(
+        app_name=app_name, user_id="workflow", session_id=session_id
+    )
+    runner = Runner(app_name=app_name, agent=_agent, session_service=sessions)
+
+    message = types.Content(role="user", parts=[types.Part(text=prompt)])
+    answer = ""
+    async for event in runner.run_async(
+        user_id="workflow", session_id=session_id, new_message=message
+    ):
+        if event.is_final_response() and event.content:
+            for part in event.content.parts:
+                if part.text:
+                    answer += part.text
+    return answer
+{% else %}
+async def _generate(prompt: str) -> str:
+    """One direct model call — no tools and no output structure, so no loop."""
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client()
+    config = types.GenerateContentConfig(
+        max_output_tokens=MAX_TOKENS,
+        temperature=TEMPERATURE,
+        **({"system_instruction": SYSTEM_PROMPT} if SYSTEM_PROMPT else {}),
+    )
+    response = await client.aio.models.generate_content(
+        model=settings.LLM_MODEL or MODEL_FALLBACK,
+        contents=prompt,
+        config=config,
+    )
+    return response.text or ""
+{% endif %}
+
+
+@node(name=NODE_ID, **NODE_KWARGS({{ node_kwargs }}))
+async def {{ node.name }}(ctx: Context, node_input=None):
+    data = node_input or {}
+    try:
+        content = await _generate(_prompt(data))
+    except Exception as exc:  # noqa: BLE001
+        if ON_ERROR != "continue":
+            raise
+        return node_error(NODE_ID, exc)
+
+    out: dict = {"content": content}
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError):
+        parsed = None
+    if parsed is not None:
+        out["parsed"] = parsed
+        # With a declared output structure the parsed object *is* the result, so
+        # promote its fields rather than making the next node dig into `parsed`.
+        if OUTPUT_SCHEMA and isinstance(parsed, dict):
+            out.update(parsed)
+
+    log.info("generated %d character(s)", len(content))
+    merge_state(ctx, out)
+    return Event(output={**data, **out})

@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "workflow": {
+    "name": "Loop Demo",
+    "slug": "loop_demo",
+    "description": "for_each over a list, with the body feeding back into the loop.",
+    "version_id": "3aa086d5-aa0e-4351-9e1c-956ca096a654",
+    "canvas_version": 5
+  },
+  "entry_node": "a2a_start",
+  "terminal_node": "n_end_2",
+  "nodes": [
+    {
+      "name": "a2a_start",
+      "canvas_id": "start",
+      "type": "A2A_START",
+      "module": "nodes.a2a_start",
+      "title": "start",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "input_mode": "json",
+        "state_key": "wf",
+        "payload_schema": {
+          "fields": [
+            {
+              "name": "items",
+              "type": "array",
+              "description": "Rows to process",
+              "required": true
+            }
+          ]
+        }
+      },
+      "is_entry": true
+    },
+    {
+      "name": "n_end_2",
+      "canvas_id": "end",
+      "type": "END",
+      "module": "nodes.n_end_2",
+      "title": "end",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "output_mapping": {
+          "results": "results"
+        }
+      },
+      "is_terminal": true
+    },
+    {
+      "name": "n_loop_3",
+      "canvas_id": "loop",
+      "type": "LOOP",
+      "module": "nodes.n_loop_3",
+      "title": "loop",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "mode": "for_each",
+        "items_path": "items",
+        "max_iterations": 100
+      },
+      "routes": [
+        "loop_body",
+        "done"
+      ]
+    },
+    {
+      "name": "n_transform_1",
+      "canvas_id": "body",
+      "type": "TRANSFORM",
+      "module": "nodes.n_transform_1",
+      "title": "body",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "mode": "python",
+        "expression": "result = {'doubled': (data.get('current_item') or 0) * 2}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "START",
+      "to": "a2a_start",
+      "route": null
+    },
+    {
+      "from": "a2a_start",
+      "to": "n_loop_3",
+      "route": null
+    },
+    {
+      "from": "n_loop_3",
+      "to": "n_transform_1",
+      "route": "loop_body"
+    },
+    {
+      "from": "n_loop_3",
+      "to": "n_end_2",
+      "route": "done"
+    },
+    {
+      "from": "n_transform_1",
+      "to": "n_loop_3",
+      "route": null
+    }
+  ],
+  "join_nodes": [],
+  "env_keys": [
+    {
+      "key": "PORT",
+      "required": false,
+      "needed_by": [
+        "serving"
+      ],
+      "default": "8080",
+      "description": "Port the agent listens on."
+    },
+    {
+      "key": "AGENT_NAME",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ],
+      "default": "loop_demo",
+      "description": "Advertised agent name."
+    },
+    {
+      "key": "AGENT_DESCRIPTION",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ],
+      "description": "Advertised description."
+    },
+    {
+      "key": "AGENT_VERSION",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ],
+      "default": "1.0.0",
+      "description": "Advertised version."
+    },
+    {
+      "key": "CLOUD_RUN_URL",
+      "required": false,
+      "needed_by": [
+        "agent_card"
+      ],
+      "default": "",
+      "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost."
+    },
+    {
+      "key": "A2A_AUTH_TOKEN",
+      "required": false,
+      "needed_by": [
+        "inbound_auth"
+      ],
+      "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+      "secret": true
+    },
+    {
+      "key": "TASK_STORE_DSN",
+      "required": false,
+      "needed_by": [
+        "task_persistence"
+      ],
+      "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+      "secret": true
+    }
+  ]
+}

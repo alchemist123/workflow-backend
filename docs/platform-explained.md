@@ -63,7 +63,7 @@ workflowStore
 
 ### The config panel
 
-When you click a node, the right panel opens. This is `NodeConfigPanel/index.tsx`. It looks at the node's `type` and renders a different form for each type. For example, a `MODEL` node shows a dropdown to pick Google Gemini vs Vertex AI, then shows different fields depending on which provider you pick. All the form changes call `updateNodeConfig()` which updates the node's `config` object in the store.
+When you click a node, the right panel opens. This is `NodeConfigPanel/index.tsx`. It looks at the node's `type` and renders a different form for each type. For example, an `LLM_AGENT` node shows a dropdown to pick Google Gemini vs Vertex AI, then shows different fields depending on which provider you pick. All the form changes call `updateNodeConfig()` which updates the node's `config` object in the store.
 
 ---
 
@@ -145,62 +145,124 @@ The IR is saved to the database. The canvas JSON is also saved (so you can re-op
 
 ---
 
-## Step 4 — Execution (The Engine)
+## Step 4 — Running It
 
-When someone hits "Run", the engine takes the IR and traverses it like following a recipe.
+When someone hits "Run", the platform does **not** execute the workflow itself.
+It renders the workflow's package and runs *that*, over the package's own A2A
+interface.
 
-### How it works
+That sounds like a detour, and it is the most important design decision in the
+codebase. An earlier version had an engine here that walked the IR directly —
+and it had already drifted from the generated packages. A `LOOP` ran real
+iterations in the platform and a single pass in a container. Testing told you
+about code that was never going to ship. Now there is one implementation, so a
+test run and a deployment are the same thing.
 
-The engine starts at the trigger node and follows the `next` list, one node at a time:
+### What happens
 
 ```
-trigger_node  →  agent_node  →  end_node
+POST /workflows/{id}/versions/{vid}/test   {payload, mode}
+  │
+  ├─ compile the graph plan, and let ADK check it            (Step 3)
+  ├─ render the package — or reuse it if nothing changed
+  ├─ create a run record, return it straight away
+  │
+  └─ in the background: run the package's own run_once.py
+         │  which calls the workflow the way a real caller would
+         ▼
+     { state, task_id, result, per-node trace }
+         │
+         ├─ the run record's output
+         └─ one log row per node, keyed by canvas node
 ```
 
-For each node, it:
+### The ADK graph
 
-1. Writes a log entry: "this node is now running" (shown as a spinning badge in the UI)
-2. Calls the node's `execute()` method with the current `state` dict
-3. The node does its work and returns a new `state` dict
-4. Writes a log entry: "this node succeeded / failed"
-5. Moves to the next node, passing `state` along
+The generated `agent.py` is the whole topology, and it is short enough to read:
 
-`state` is just a Python dict that flows through the whole workflow like water through pipes. Each node receives what the previous node returned.
+```python
+root_agent = Workflow(
+    name=settings.AGENT_NAME,
+    edges=[
+        (START, a2a_start),
+        (a2a_start, n_condition_1),
+        Edge(from_node=n_condition_1, to_node=n_transform_3, route="high_score"),
+        Edge(from_node=n_condition_1, to_node=n_transform_4, route="low_score"),
+        (n_transform_3, n_end_2),
+        (n_transform_4, n_end_2),
+    ],
+)
+```
+
+Each node is one file in `nodes/`, and they all look like this:
+
+```python
+@node(name="n_transform_3", **NODE_KWARGS(timeout=30))
+async def n_transform_3(ctx: Context, node_input=None):
+    data = node_input or {}
+    result = _transform(data)
+    merge_state(ctx, result)
+    return Event(output={**data, **result})
+```
+
+`node_input` is whatever the previous node returned — the same "dict flowing
+through pipes" idea as before, except ADK does the passing. `ctx.state` is
+where a node puts something later nodes need regardless of which branch ran.
 
 ### Special nodes
 
-**CONDITION node** — instead of `next`, it has `branches`:
+**CONDITION** returns `Event(route="high_score")`, and the edge in `agent.py`
+maps each route value to a target. If two branches go to the *same* target they
+must be merged onto one edge — ADK rejects two edges sharing the same pair of
+endpoints.
 
-```json
-"branches": {
-  "true": ["premium_node"],
-  "false": ["standard_node"]
-}
-```
+**PARALLEL_FORK** fans out along several plain edges; ADK runs every successor.
+Its branches then **have to** rejoin at a `MERGE`, because a workflow may end at
+exactly one node.
 
-When the condition node runs, it evaluates a Python expression against the current `state` and sets `_branch = "true"` or `"false"`. The engine reads that and follows the matching branch.
+**MERGE** becomes an ADK `JoinNode`. It waits for every branch and hands the
+next node a dict keyed by which node produced what.
 
-**PARALLEL_FORK node** — runs all its branches at the same time using `asyncio.gather()`.
+**LOOP** is a back-edge: the body routes back to the loop node, which decides
+whether to go round again. The counter lives in `ctx.state`, and
+`max_iterations` is a hard stop so a bad condition cannot spin forever.
 
-**ORCHESTRATOR_AGENT node** — runs a full AI agent loop (Google ADK) that can call tools multiple times before returning a final answer.
+**ORCHESTRATOR_AGENT** is an ADK `LlmAgent` inside the graph, with its connected
+tools attached. It can call them several times before answering.
 
----
+### Two rules that bite
+
+Both fail while running rather than at import, so they are worth memorising:
+
+1. **A workflow ends at exactly one node.** Fan out as much as you like in the
+   middle, but every path has to come back together.
+2. **The END node must emit content**, not just data. The A2A layer turns that
+   content into the task's result. A node that returns only `output` leaves the
+   caller polling a task that never finishes.
+
+The validator catches both when you Save & Compile, which is why it complains
+about two END nodes.
 
 ## Step 5 — The Node Types
 
-### Trigger nodes (start a workflow)
+### The entry node
 
 | Node | What it does |
 |------|-------------|
-| `HTTP_TRIGGER` | Workflow starts when someone POSTs to a URL |
-| `SCHEDULE_TRIGGER` | Workflow starts on a cron schedule |
-| `WEBHOOK_TRIGGER` | Workflow starts when a webhook fires |
+| `A2A_START` | Where every workflow begins. Another agent sends a message, and its payload is what the workflow receives. |
+
+There is only one, because a packaged workflow is an agent: it is called, not
+scheduled. If you want it to run on a timer, point Cloud Scheduler at it.
+
+Its `payload_schema` is a list of named fields — that is both the contract the
+agent advertises and what the Run panel builds its form from, so the two cannot
+disagree.
 
 ### AI nodes
 
 | Node | What it does |
 |------|-------------|
-| `MODEL` | One LLM call — give it a prompt template, get text back. No tool use, no multi-turn. |
+| `LLM_AGENT` | One LLM agent. Bare, it is a single LLM call. Give it tools and it becomes an agent loop; wire it into another agent or a tool group and it becomes a sub-agent. |
 | `AGENT` | Google ADK single-turn agent. Can connect to MCP tools or A2A remote agents. |
 | `ORCHESTRATOR_AGENT` | Full AI agent loop — picks tools, calls them, reasons about results, repeats until done. |
 
@@ -218,7 +280,7 @@ When the condition node runs, it evaluates a Python expression against the curre
 | Node | What it does |
 |------|-------------|
 | `CONDITION` | `if/else` branching — evaluates a Python expression against the current state |
-| `LOOP` | Iterates over a list or repeats until a condition becomes false |
+| `LOOP` | Walks a list, or repeats until an exit condition becomes true. The list is read once on entry, so the body cannot change what is being walked. |
 | `TRANSFORM` | Reshapes data between nodes. Three modes: JMESPath, Jinja2, Python |
 | `PARALLEL_FORK` | Splits execution into parallel branches |
 | `MERGE` | Rejoins parallel branches |
@@ -345,71 +407,77 @@ The `ORCHESTRATOR_AGENT` node uses **Google ADK** (Agent Development Kit). Here'
 
 ## Step 6 — Packaging (The Standalone Container)
 
-When you click "Deploy", the platform generates a completely self-contained Python project. It has **zero dependency on this backend** — no database, no shared volumes, nothing. You can copy the folder to any machine and run it.
-
-### How the code is generated
-
-`codegen.py` reads the IR and writes a `main.py` file. It inlines every node's logic as actual Python code inside a `while _next:` loop:
-
-```python
-# Generated main.py (simplified)
-async def run_workflow(trigger_payload: dict) -> dict:
-    state = trigger_payload
-    _next = "trigger_node"
-
-    while _next:
-        if _next == "trigger_node":
-            state = state.get("body", state)
-            _next = "agent_node"
-
-        elif _next == "agent_node":
-            # all the orchestrator logic inlined here
-            _orch_result = await _run_orchestrator({...config baked in...}, state)
-            state = _orch_result
-            _next = "end_node"
-
-        elif _next == "end_node":
-            _next = None
-
-    return state
-```
-
-The `while _next:` loop IS the engine. Simple, readable, no framework needed.
-
-### What files are in the generated package
+Packaging writes a real Python project. Nothing is generated by gluing strings
+together: every file is either copied from a checked-in template or filled in
+from a Jinja2 template.
 
 ```
 my-workflow-abc12345/
-├── main.py            ← the entire workflow as standalone Python
-├── requirements.txt   ← only what this specific workflow needs
-├── Dockerfile         ← python:3.11-slim + uv for fast installs
-├── docker-compose.yml ← mounts gcloud credentials, maps a free port
-├── .env               ← blank key stubs (fill these in before running)
-├── .env.example       ← documented template with instructions
-├── ir.json            ← snapshot of the IR (useful for debugging)
-└── README.md          ← step-by-step quick start
+├── main.py              ← starts the server
+├── agent.py             ← the graph (the edge list is the whole topology)
+├── nodes/               ← one file per canvas node, plus registry.py
+├── core/                ← config, agent card, app assembly, state helpers
+├── tools/               ← MCP servers, remote agents and functions as tools
+├── tests/               ← the package tests itself: graph, nodes, A2A round-trip
+├── run_once.py          ← run the workflow once from the command line
+├── graph.json           ← the compiled plan
+├── .env / .env.example  ← .env has your values; .env.example is the committed template
+├── Dockerfile / docker-compose.yml
+└── README.md
 ```
 
-### How Vertex AI auth works in the container
+### It is checked before you get it
 
-The `docker-compose.yml` mounts your laptop's gcloud credentials folder into the container:
+The renderer will not hand you a package that cannot run:
 
-```yaml
-volumes:
-  - ~/.config/gcloud:/root/.config/gcloud:ro
-environment:
-  - GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json
-```
+1. Any Python you typed on the canvas is compiled first, so a typo fails
+   packaging *and names the node you typed it in*.
+2. Every generated file is byte-compiled.
+3. The graph is **imported** in a separate process. This catches things
+   compiling cannot — a bug once emitted `null` instead of `None`, which is
+   valid Python syntax and only failed at import.
+4. `ruff` checks for unused imports and undefined names.
 
-Run this once on your laptop:
+### Your credentials are not in it
+
+The package is a git repository, and it serves its own `graph.json` over HTTP.
+Anything you typed as a credential — an API key, a token, an MCP URL with a
+password in it — is therefore **not** in any of those files. Each one became an
+environment variable, and the value sits only in `.env`, which both
+`.gitignore` and `.dockerignore` exclude. The committed `.env.example` names
+every variable and leaves the secrets blank.
+
+### Running it
 
 ```bash
-gcloud auth application-default login
+cp .env.example .env      # fill in real values
+docker compose up --build
+
+curl http://localhost:8080/health
+curl http://localhost:8080/.well-known/agent-card.json
 ```
 
-That saves credentials to `~/.config/gcloud/`. The Docker container reads them through the mounted volume. No API keys in files, no secrets to manage.
+The agent card is how other agents find this one and learn what it accepts.
 
----
+### Calling it
+
+Two ways, both `POST /`:
+
+```bash
+# Wait for the answer
+-d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{
+      "message":{"role":"user","kind":"message","messageId":"m1",
+                 "parts":[{"kind":"text","text":"{\"text\":\"hello\"}"}]},
+      "configuration":{"blocking":true}}}'
+
+# Submit now, collect later
+#   ...same, with "blocking": false → returns a task id
+-d '{"jsonrpc":"2.0","id":"2","method":"tasks/get","params":{"id":"<task-id>"}}'
+```
+
+Use the second for a workflow too slow to hold a connection open for. By default
+task ids only live in the process that created them; set `TASK_STORE_DSN` to a
+database and they survive restarts and more than one instance.
 
 ## The Test Agents
 
@@ -448,53 +516,81 @@ The workflow seed scripts (`workflows/seed_*.py`) create workflow definitions in
 
 ## How Everything Connects — One Full Example
 
-User types `{"message": "what should I eat to lose weight?"}` and clicks Run on the **Multi-Tool Orchestrator** workflow.
+User types `{"message": "what should I eat to lose weight?"}` and clicks Run on
+the **Multi-Tool Orchestrator** workflow.
 
 ```
 Browser
-  └── POST /api/v1/workflows/{id}/execute  ← body: {"message": "..."}
+  └── POST /api/v1/workflows/{id}/versions/{vid}/test
+        body: {"payload": {"message": "..."}, "mode": "message"}
         │
         ▼
-Engine loads IR from database
-  → starts at HTTP_TRIGGER node
-  → state = {"message": "what should I eat to lose weight?"}
-  → next = ORCHESTRATOR_AGENT
+Platform
+  1. Compiles the graph plan from the stored IR, and builds it under ADK to
+     check it is legal. Three graph nodes: a2a_start, n_orchestrator_agent_2,
+     n_end_3. The three remote agents are *tools*, not nodes.
+  2. Renders the package (or reuses it — nothing changed).
+  3. Creates a run record and returns it, so the UI can start polling.
+  4. Runs the package's run_once.py in a subprocess.
+        │
+        ▼
+Inside the package
+  run_once.py calls its own A2A endpoint:
+        POST / {"method": "message/send", "configuration": {"blocking": true}}
+        │
+        ▼
+  nodes/a2a_start.py
+        payload → {"message": "what should I eat to lose weight?"}
+        stored in ctx.state, passed on
 
-ORCHESTRATOR_AGENT._run_adk():
-  1. Wraps A2A agents as FunctionTools:
-       a2a_diet_advisor(message)    → POST http://host:8005/
-       a2a_text_summarizer(message) → POST http://host:8003/
-       a2a_calculator(message)      → POST http://host:8004/
+  nodes/n_orchestrator_agent_2.py
+        1. Builds its tools once, from the env vars the compiler assigned:
+             a2a_diet_advisor(message)    → A2A_DIET_ADVISOR_URL
+             a2a_text_summarizer(message) → A2A_TEXT_SUMMARIZER_URL
+             a2a_calculator(message)      → A2A_CALCULATOR_URL
+        2. LlmAgent(model=settings.LLM_MODEL, tools=[...])
+        3. Runner.run_async():
+             Gemini reads the question and the tool descriptions
+             Gemini calls a2a_diet_advisor
+             → POST to the diet advisor (A2A JSON-RPC message/send)
+             → "Eat more protein and fewer processed foods..."
+             Gemini writes its answer
+        4. Returns {"result": "Here is some advice: ..."}
 
-  2. Creates LlmAgent("gemini-2.0-flash", tools=[...])
-
-  3. Runner.run_async() starts:
-       Gemini reads: "what should I eat to lose weight?" + tool descriptions
-       Gemini decides: call a2a_diet_advisor
-       ADK runs our function → HTTP POST to diet-advisor (A2A JSON-RPC)
-       Diet advisor returns: "Eat more protein and fewer processed foods..."
-       Gemini writes final answer: "Here is some advice: ..."
-
-  4. Returns {"result": "Here is some advice: ..."}
-
-state = {"result": "Here is some advice: ..."}
-  → next = END
-
-END: _next = None → workflow returns state
-
-Engine writes WorkflowExecution.status = "success"
-Frontend polls for node logs → shows green ✓ on every canvas node
+  nodes/n_end_3.py
+        Emits the result as *content*, which is what makes the A2A task
+        reach `completed` and carry a result artifact.
+        │
+        ▼
+run_once.py prints:
+  { "ok": true, "state": "completed", "task_id": "...",
+    "result": {...},
+    "trace": [a2a_start, n_orchestrator_agent_2, n_end_3] }
+        │
+        ▼
+Platform
+  → run record: status success, output = result + A2A lifecycle
+  → one node log row per trace step, keyed by canvas node id
+        │
+        ▼
+Browser
+  Runs panel polls until the status is terminal, then fetches node logs
+  → green ✓ on each canvas node that ran
+  → the A2A task id, state and duration shown alongside the result
 ```
 
----
+Notice what is *not* in that flow: the platform never interprets a node. It
+compiles, renders, and then runs the same package a deployment would.
 
 ## Key Things to Remember
 
 | Concept | What it means in practice |
 |---------|--------------------------|
-| **IR is the source of truth** | The canvas is just a drawing. Once compiled, the engine only reads the IR. Always Save & Compile after any canvas change. |
-| **`state` is just a dict** | Every node takes a Python dict and returns a Python dict. That dict passes from node to node until END. |
-| **Tool nodes vanish from the IR** | REMOTE_AGENT / TOOL / FUNCTION nodes wired to an orchestrator get embedded inside the orchestrator's config. They don't appear as separate nodes in the IR. |
-| **The packaged container is just Python** | Open `main.py` in any generated package. It's plain readable Python. No magic. |
+| **Always Save & Compile** | The canvas is just a drawing. Running and packaging both work from the compiled version, so an unsaved change has no effect. |
+| **There is one execution path** | The platform does not run workflows itself. Testing renders the package and runs that, so what you test is what ships. |
+| **`node_input` is just a dict** | Every node takes the previous node's dict and returns a dict. `ctx.state` is for values later nodes need whichever branch ran. |
+| **Tool nodes are not graph nodes** | REMOTE_AGENT / TOOL / FUNCTION wired to an orchestrator's `tools` handle become tools it may call. They get no file of their own in the package. |
+| **The package is just Python** | Open `agent.py` and `nodes/` in any generated package. Real modules, one per node, no magic. You can run `pytest` in there.  |
+| **A workflow ends at one node** | And that node has to emit content, or the caller waits on a task that never completes. |
 | **A2A and MCP are just HTTP** | Both protocols are HTTP POST with conventions about request/response shape. There's nothing exotic under the hood. |
 | **Docker networking** | If the backend runs in Docker and agents run on your host machine, use `http://host.docker.internal:PORT` — not `http://localhost:PORT` — because `localhost` inside a container means the container itself. |

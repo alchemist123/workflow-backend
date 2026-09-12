@@ -6,6 +6,7 @@ from app.nodes.base import NodeDefinition, PaletteMetadata
 @dataclass
 class ParallelForkNode(NodeDefinition):
     node_type: str = "PARALLEL_FORK"
+    uses_named_routes: bool = True
     version: str = "1"
     palette: PaletteMetadata = None
 
@@ -39,5 +40,3 @@ class ParallelForkNode(NodeDefinition):
         self.output_schema = {"type": "object"}
         self.output_handles = []  # dynamic from config.branches
 
-    async def execute(self, node_config: dict, input_data: dict, context: Any) -> dict:
-        return {"data": input_data, "_parallel_branches": node_config.get("branches", [])}

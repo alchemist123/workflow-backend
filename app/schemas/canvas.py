@@ -1,6 +1,14 @@
 from pydantic import BaseModel, Field
 from typing import Any
 
+# Bumped when the canvas shape changes in a way that requires rewriting saved
+# workflows. app/compiler/canvas_migrations.py holds the migrations keyed on it.
+#   1  four trigger node types
+#   2  A2A_START replaces all triggers; single entry, single terminal
+#   3  ORCHESTRATOR_AGENT loses tool_execution_mode; ordering is drawn with
+#      SEQUENTIAL_AGENT / PARALLEL_AGENT nodes instead
+CURRENT_SCHEMA_VERSION = 6
+
 
 class NodePosition(BaseModel):
     x: float
@@ -46,3 +54,8 @@ class CanvasEdge(BaseModel):
 class CanvasPayload(BaseModel):
     nodes: list[CanvasNode]
     edges: list[CanvasEdge]
+
+    # Defaults to the current version: a canvas arriving from the UI is always
+    # current, while one loaded from the database may be older and is migrated
+    # on read by app/compiler/canvas_migrations.py.
+    schema_version: int = CURRENT_SCHEMA_VERSION

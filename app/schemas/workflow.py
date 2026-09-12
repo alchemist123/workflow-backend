@@ -67,3 +67,29 @@ class ExecutionRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AnswerRequest(BaseModel):
+    """The reply to a run parked on a HUMAN_APPROVAL node.
+
+    `response` is validated against the schema the paused task advertised, by
+    ADK, before the node sees it -- so it must at least carry `approved`.
+    """
+
+    response: dict[str, Any] = {}
+
+
+class TestRunRequest(BaseModel):
+    """Input for a test run against the generated package."""
+
+    payload: dict[str, Any] = {}
+
+    # message: one blocking `message/send`, which is how most callers invoke an
+    # agent. task: submit without blocking, then poll `tasks/get` — the path a
+    # caller uses for a workflow too slow to hold a connection open for.
+    mode: str = "message"
+
+    # Re-render the package even if one already exists for this version. Needed
+    # after editing the template or the renderer, not after a canvas change
+    # (which produces a new version).
+    rebuild: bool = False

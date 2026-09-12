@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "workflow": {
+    "name": "text_triage",
+    "description": "Triages inbound text by length and returns a summary.",
+    "version_id": "example-0000",
+    "canvas_version": 1
+  },
+  "entry_node": "a2a_start",
+  "terminal_node": "n_end_5",
+  "nodes": [
+    {
+      "name": "a2a_start",
+      "canvas_id": "node_example_start",
+      "type": "A2A_START",
+      "module": "nodes.a2a_start",
+      "timeout": 30,
+      "retries": 1,
+      "on_error": "fail"
+    },
+    {
+      "name": "n_normalise_1",
+      "canvas_id": "node_example_normalise",
+      "type": "TRANSFORM",
+      "module": "nodes.n_normalise_1",
+      "timeout": 30,
+      "retries": 1,
+      "on_error": "fail"
+    },
+    {
+      "name": "n_route_2",
+      "canvas_id": "node_example_route",
+      "type": "CONDITION",
+      "module": "nodes.n_route_2",
+      "timeout": 30,
+      "retries": 1,
+      "on_error": "fail",
+      "routes": [
+        "long",
+        "short"
+      ],
+      "default_route": "short"
+    },
+    {
+      "name": "n_summarise_3",
+      "canvas_id": "node_example_summarise",
+      "type": "FUNCTION",
+      "module": "nodes.n_summarise_3",
+      "timeout": 60,
+      "retries": 2,
+      "on_error": "continue"
+    },
+    {
+      "name": "n_passthrough_4",
+      "canvas_id": "node_example_passthrough",
+      "type": "TRANSFORM",
+      "module": "nodes.n_passthrough_4",
+      "timeout": 30,
+      "retries": 1,
+      "on_error": "fail"
+    },
+    {
+      "name": "n_end_5",
+      "canvas_id": "node_example_end",
+      "type": "END",
+      "module": "nodes.n_end_5",
+      "timeout": 30,
+      "retries": 1,
+      "on_error": "fail"
+    }
+  ],
+  "edges": [
+    {
+      "from": "START",
+      "to": "a2a_start",
+      "route": null
+    },
+    {
+      "from": "a2a_start",
+      "to": "n_normalise_1",
+      "route": null
+    },
+    {
+      "from": "n_normalise_1",
+      "to": "n_route_2",
+      "route": null
+    },
+    {
+      "from": "n_route_2",
+      "to": "n_summarise_3",
+      "route": "long"
+    },
+    {
+      "from": "n_route_2",
+      "to": "n_passthrough_4",
+      "route": "short"
+    },
+    {
+      "from": "n_summarise_3",
+      "to": "n_end_5",
+      "route": null
+    },
+    {
+      "from": "n_passthrough_4",
+      "to": "n_end_5",
+      "route": null
+    }
+  ],
+  "join_nodes": [],
+  "env_keys": [
+    {
+      "key": "PORT",
+      "required": false,
+      "needed_by": [
+        "serving"
+      ]
+    },
+    {
+      "key": "AGENT_NAME",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ]
+    },
+    {
+      "key": "AGENT_DESCRIPTION",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ]
+    },
+    {
+      "key": "AGENT_VERSION",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ]
+    },
+    {
+      "key": "CLOUD_RUN_URL",
+      "required": false,
+      "needed_by": [
+        "agent_card"
+      ]
+    },
+    {
+      "key": "A2A_AUTH_TOKEN",
+      "required": false,
+      "needed_by": [
+        "inbound_auth"
+      ]
+    },
+    {
+      "key": "TASK_STORE_DSN",
+      "required": false,
+      "needed_by": [
+        "task_persistence"
+      ]
+    }
+  ]
+}

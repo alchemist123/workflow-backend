@@ -32,7 +32,9 @@ class Workflow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     versions: Mapped[list["WorkflowVersion"]] = relationship("WorkflowVersion", back_populates="workflow", cascade="all, delete-orphan")
-    executions: Mapped[list["WorkflowExecution"]] = relationship("WorkflowExecution", back_populates="workflow")
+    executions: Mapped[list["WorkflowExecution"]] = relationship(
+        "WorkflowExecution", back_populates="workflow", cascade="all, delete-orphan"
+    )
 
 
 class WorkflowVersion(Base):
@@ -48,7 +50,9 @@ class WorkflowVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     workflow: Mapped["Workflow"] = relationship("Workflow", back_populates="versions")
-    executions: Mapped[list["WorkflowExecution"]] = relationship("WorkflowExecution", back_populates="version")
+    executions: Mapped[list["WorkflowExecution"]] = relationship(
+        "WorkflowExecution", back_populates="version", cascade="all, delete-orphan"
+    )
 
 
 class WorkflowExecution(Base):

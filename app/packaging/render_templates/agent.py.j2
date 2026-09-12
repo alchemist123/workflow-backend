@@ -1,0 +1,57 @@
+"""The workflow graph for {{ plan.workflow_name }}.
+
+Generated from the canvas. The edge list below is the whole topology, so this
+file is the one place to look to understand what the package does.
+
+Edge forms:
+    (a, b)                              a plain edge
+    Edge(from_node=a, to_node=b,        a conditional edge; `route` is matched
+         route="x")                     against the value the source node
+                                        returns as Event(route=...)
+    Edge(..., route=["x", "y"])         several routes to one target, merged
+                                        because ADK rejects two edges sharing
+                                        the same (from, to) pair
+
+Invariants the compiler guarantees, both enforced by ADK:
+  * exactly one node wired from START, and exactly one terminal node
+  * no two edges share a (from_node, to_node) pair
+
+Canvas node -> graph node:
+{% for n in plan.nodes %}
+    {{ "%-24s"|format(n.name) }} {{ n.node_type }}  (canvas '{{ n.canvas_id }}'{% if n.title %} — {{ n.title }}{% endif %})
+{% endfor %}
+"""
+
+from __future__ import annotations
+
+from google.adk import Workflow
+{% if plan.edges | selectattr('route') | list %}
+from google.adk.workflow import START, Edge
+{% else %}
+from google.adk.workflow import START
+{% endif %}
+
+from core.config import settings
+from nodes.registry import NODES
+
+# ── Nodes ─────────────────────────────────────────────────────────────────────
+{% for n in plan.nodes %}
+{{ n.name }} = NODES[{{ n.name | tojson }}]
+{% endfor %}
+
+# ── Graph ─────────────────────────────────────────────────────────────────────
+# AGENT_NAME must be a valid Python identifier: ADK validates a Workflow's name
+# as a node name. The generator defaults it to {{ plan.workflow_slug | tojson }}.
+root_agent = Workflow(
+    name=settings.AGENT_NAME,
+    description=settings.AGENT_DESCRIPTION,
+    edges=[
+{% for e in plan.edges %}
+{% if e.route is none %}
+        ({{ "START" if e.from_node == "START" else e.from_node }}, {{ e.to_node }}),
+{% else %}
+        Edge(from_node={{ e.from_node }}, to_node={{ e.to_node }}, route={{ e.route | tojson }}),
+{% endif %}
+{% endfor %}
+    ],
+)

@@ -1,0 +1,28 @@
+"""Entry point for a generated ADK graph workflow served over A2A.
+
+Run locally:      uvicorn main:a2a_app --host 0.0.0.0 --port 8080
+Run in Docker:    docker compose up --build
+
+Endpoints:
+    POST /                              A2A JSON-RPC (message/send, tasks/get, ...)
+    GET  /.well-known/agent-card.json   the agent card
+    GET  /health                        liveness
+    GET  /graph                         the compiled graph, for debugging
+"""
+
+from core.logging import configure_logging
+
+configure_logging()
+
+from agent import root_agent  # noqa: E402  (logging must be configured first)
+from core.a2a_app import build_app  # noqa: E402
+
+a2a_app = build_app(root_agent)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    from core.config import settings
+
+    uvicorn.run(a2a_app, host="0.0.0.0", port=settings.PORT)

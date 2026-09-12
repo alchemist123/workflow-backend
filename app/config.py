@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     docker_registry: str = "localhost:5000"
     runner_base_image: str = "python:3.11-slim"
 
-    # LLM provider keys (for AGENT/MODEL/ORCHESTRATOR_AGENT nodes)
+    # LLM provider keys (for AGENT/LLM_AGENT/ORCHESTRATOR_AGENT nodes)
     anthropic_api_key: str = ""
     google_api_key: str = ""
 

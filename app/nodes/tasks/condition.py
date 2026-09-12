@@ -6,6 +6,7 @@ from app.nodes.base import NodeDefinition, PaletteMetadata
 @dataclass
 class ConditionNode(NodeDefinition):
     node_type: str = "CONDITION"
+    uses_named_routes: bool = True
     version: str = "1"
     palette: PaletteMetadata = None
 
@@ -56,18 +57,3 @@ class ConditionNode(NodeDefinition):
         # CONDITION nodes: named branches + a default fallthrough
         self.output_handles = ["true", "false", "default"]
 
-    async def execute(self, node_config: dict, input_data: dict, context: Any) -> dict:
-        branches = node_config.get("branches", [])
-        safe_globals: dict = {"__builtins__": {}}
-        safe_locals = {"data": input_data}
-
-        for branch in branches:
-            try:
-                result = eval(branch["expression"], safe_globals, safe_locals)  # noqa: S307
-                if result:
-                    # Merge input_data at the top level so downstream nodes access fields directly
-                    return {**input_data, "matched_branch": branch["name"], "_branch": branch["name"]}
-            except Exception:
-                continue
-
-        return {**input_data, "matched_branch": "default", "_branch": "default"}

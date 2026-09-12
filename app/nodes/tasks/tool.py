@@ -6,6 +6,9 @@ from app.nodes.base import NodeDefinition, PaletteMetadata
 @dataclass
 class ToolNode(NodeDefinition):
     node_type: str = "TOOL"
+    provides_tool: bool = True
+    secret_config_keys: frozenset[str] = frozenset({'mcp_url', 'auth_token'})
+    supports_on_error_continue: bool = True
     version: str = "1"
     palette: PaletteMetadata = None
     config_schema: dict = None
@@ -51,31 +54,3 @@ class ToolNode(NodeDefinition):
         self.output_schema = {"type": "object"}
         self.output_handles = ["output", "error"]
 
-    async def execute(self, node_config: dict, input_data: dict, context: Any) -> dict:
-        import httpx
-
-        mcp_url: str = node_config.get("mcp_url", "")
-        tool_name: str = node_config.get("tool_name", "")
-        static_args: dict = node_config.get("tool_args") or {}
-        auth: dict = node_config.get("auth") or {}
-
-        args_jmespath: str | None = node_config.get("args_jmespath")
-        if args_jmespath:
-            import jmespath
-            derived = jmespath.search(args_jmespath, input_data) or {}
-            arguments = {**static_args, **(derived if isinstance(derived, dict) else {})}
-        else:
-            arguments = {**static_args, **input_data}
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                mcp_url,
-                json={
-                    "jsonrpc": "2.0", "id": 1,
-                    "method": "tools/call",
-                    "params": {"name": tool_name, "arguments": arguments},
-                },
-                headers=auth,
-            )
-            data = resp.json()
-            return data.get("result", data)

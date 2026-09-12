@@ -1,0 +1,171 @@
+{
+  "plan": {
+    "edges": [
+      {
+        "from": "START",
+        "route": null,
+        "to": "a2a_start"
+      },
+      {
+        "from": "a2a_start",
+        "route": null,
+        "to": "n_transform_2"
+      },
+      {
+        "from": "n_transform_2",
+        "route": null,
+        "to": "n_transform_3"
+      },
+      {
+        "from": "n_transform_3",
+        "route": null,
+        "to": "n_end_1"
+      }
+    ],
+    "entry_node": "a2a_start",
+    "env_keys": [
+      {
+        "default": "8080",
+        "description": "Port the agent listens on.",
+        "key": "PORT",
+        "needed_by": [
+          "serving"
+        ],
+        "required": false
+      },
+      {
+        "default": "data_pipeline",
+        "description": "Advertised agent name.",
+        "key": "AGENT_NAME",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "description": "Advertised description.",
+        "key": "AGENT_DESCRIPTION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "1.0.0",
+        "description": "Advertised version.",
+        "key": "AGENT_VERSION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "",
+        "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost.",
+        "key": "CLOUD_RUN_URL",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": false
+      },
+      {
+        "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+        "key": "A2A_AUTH_TOKEN",
+        "needed_by": [
+          "inbound_auth"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+        "key": "TASK_STORE_DSN",
+        "needed_by": [
+          "task_persistence"
+        ],
+        "required": false,
+        "secret": true
+      }
+    ],
+    "join_nodes": [],
+    "nodes": [
+      {
+        "canvas_id": "trigger",
+        "config": {
+          "input_mode": "json",
+          "payload_schema": {
+            "fields": [
+              {
+                "description": "Records to process",
+                "name": "items",
+                "required": true,
+                "type": "array"
+              }
+            ]
+          },
+          "state_key": "wf"
+        },
+        "description": "POST /run with {\"user\": {\"name\": \"...\", \"email\": \"...\"}, \"items\": [...], \"total\": N}",
+        "is_entry": true,
+        "module": "nodes.a2a_start",
+        "name": "a2a_start",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Start",
+        "type": "A2A_START"
+      },
+      {
+        "canvas_id": "end",
+        "is_terminal": true,
+        "module": "nodes.n_end_1",
+        "name": "n_end_1",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 30,
+        "title": "Done",
+        "type": "END"
+      },
+      {
+        "canvas_id": "extract",
+        "config": {
+          "expression": "{name: user.name, email: user.email, item_count: length(items), total: total}",
+          "mode": "jmespath"
+        },
+        "description": "JMESPath: flatten nested user + aggregate items",
+        "module": "nodes.n_transform_2",
+        "name": "n_transform_2",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 30,
+        "title": "Extract Fields",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "format",
+        "config": {
+          "expression": "{\"greeting\": \"Hello {{ name }}!\", \"email\": \"{{ email }}\", \"summary\": \"You have {{ item_count }} items totalling {{ total }}.\"}",
+          "mode": "jinja2"
+        },
+        "description": "Jinja2: render a human-readable summary",
+        "module": "nodes.n_transform_3",
+        "name": "n_transform_3",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 30,
+        "title": "Format Output",
+        "type": "TRANSFORM"
+      }
+    ],
+    "schema_version": 1,
+    "terminal_node": "n_end_1",
+    "workflow": {
+      "canvas_version": 2,
+      "description": "Seed workflow: data_pipeline",
+      "name": "data_pipeline",
+      "slug": "data_pipeline",
+      "version_id": "golden-version-id"
+    }
+  },
+  "warnings": []
+}

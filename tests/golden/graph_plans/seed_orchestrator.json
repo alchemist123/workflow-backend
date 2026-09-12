@@ -1,0 +1,297 @@
+{
+  "plan": {
+    "edges": [
+      {
+        "from": "START",
+        "route": null,
+        "to": "a2a_start"
+      },
+      {
+        "from": "a2a_start",
+        "route": null,
+        "to": "n_orchestrator_agent_2"
+      },
+      {
+        "from": "n_orchestrator_agent_2",
+        "route": null,
+        "to": "n_end_1"
+      }
+    ],
+    "entry_node": "a2a_start",
+    "env_keys": [
+      {
+        "default": "8080",
+        "description": "Port the agent listens on.",
+        "key": "PORT",
+        "needed_by": [
+          "serving"
+        ],
+        "required": false
+      },
+      {
+        "default": "orchestrator",
+        "description": "Advertised agent name.",
+        "key": "AGENT_NAME",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "description": "Advertised description.",
+        "key": "AGENT_DESCRIPTION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "1.0.0",
+        "description": "Advertised version.",
+        "key": "AGENT_VERSION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "",
+        "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost.",
+        "key": "CLOUD_RUN_URL",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": false
+      },
+      {
+        "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+        "key": "A2A_AUTH_TOKEN",
+        "needed_by": [
+          "inbound_auth"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+        "key": "TASK_STORE_DSN",
+        "needed_by": [
+          "task_persistence"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "default": "",
+        "description": "GCP project for Vertex AI.",
+        "key": "GOOGLE_CLOUD_PROJECT",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": true
+      },
+      {
+        "default": "us-central1",
+        "description": "Vertex AI region.",
+        "key": "VERTEX_AI_LOCATION",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false
+      },
+      {
+        "default": "gemini-2.5-flash",
+        "description": "Default model.",
+        "key": "LLM_MODEL",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false
+      },
+      {
+        "default": "TRUE",
+        "description": "TRUE routes through Vertex AI; unset uses an AI Studio key.",
+        "key": "GOOGLE_GENAI_USE_VERTEXAI",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false
+      },
+      {
+        "description": "Service account key as one line. Blank uses Application Default Credentials, which is the usual choice on Cloud Run.",
+        "key": "GOOGLE_SERVICE_ACCOUNT_JSON",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "AI Studio key, as an alternative to Vertex AI for local development.",
+        "key": "GOOGLE_API_KEY",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "A2A endpoint for 'diet_advisor'.",
+        "key": "A2A_DIET_ADVISOR_URL",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": true,
+        "secret": true
+      },
+      {
+        "description": "Bearer token for 'diet_advisor', if it needs one.",
+        "key": "A2A_DIET_ADVISOR_TOKEN",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "A2A endpoint for 'text_summarizer'.",
+        "key": "A2A_TEXT_SUMMARIZER_URL",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": true,
+        "secret": true
+      },
+      {
+        "description": "Bearer token for 'text_summarizer', if it needs one.",
+        "key": "A2A_TEXT_SUMMARIZER_TOKEN",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "A2A endpoint for 'calculator'.",
+        "key": "A2A_CALCULATOR_URL",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": true,
+        "secret": true
+      },
+      {
+        "description": "Bearer token for 'calculator', if it needs one.",
+        "key": "A2A_CALCULATOR_TOKEN",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false,
+        "secret": true
+      }
+    ],
+    "join_nodes": [],
+    "nodes": [
+      {
+        "canvas_id": "trigger",
+        "config": {
+          "input_mode": "json",
+          "payload_schema": {
+            "fields": [
+              {
+                "description": "Request for the orchestrator",
+                "name": "message",
+                "required": true,
+                "type": "text"
+              }
+            ]
+          },
+          "state_key": "wf"
+        },
+        "description": "POST /run with {\"message\": \"...\"}",
+        "is_entry": true,
+        "module": "nodes.a2a_start",
+        "name": "a2a_start",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Start",
+        "type": "A2A_START"
+      },
+      {
+        "canvas_id": "end",
+        "is_terminal": true,
+        "module": "nodes.n_end_1",
+        "name": "n_end_1",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 30,
+        "title": "Done",
+        "type": "END"
+      },
+      {
+        "canvas_id": "orchestrator",
+        "config": {
+          "max_turns": 5,
+          "model": "gemini-2.0-flash",
+          "output_field": "response",
+          "resolved_tools": {
+            "a2a_agents": [
+              {
+                "auth_token_env": "A2A_DIET_ADVISOR_TOKEN",
+                "description": "Use this tool to answer questions about diet, nutrition, weight loss, muscle gain, or healthy eating",
+                "endpoint_env": "A2A_DIET_ADVISOR_URL",
+                "kind": "a2a",
+                "name": "diet_advisor",
+                "node_id": "tool_diet",
+                "node_type": "REMOTE_AGENT"
+              },
+              {
+                "auth_token_env": "A2A_TEXT_SUMMARIZER_TOKEN",
+                "description": "Use this tool to summarize long pieces of text into concise key points",
+                "endpoint_env": "A2A_TEXT_SUMMARIZER_URL",
+                "kind": "a2a",
+                "name": "text_summarizer",
+                "node_id": "tool_summarizer",
+                "node_type": "REMOTE_AGENT"
+              },
+              {
+                "auth_token_env": "A2A_CALCULATOR_TOKEN",
+                "description": "Use this tool to evaluate math expressions and arithmetic calculations",
+                "endpoint_env": "A2A_CALCULATOR_URL",
+                "kind": "a2a",
+                "name": "calculator",
+                "node_id": "tool_calc",
+                "node_type": "REMOTE_AGENT"
+              }
+            ],
+            "agents": [],
+            "functions": [],
+            "groups": [],
+            "mcp_servers": []
+          },
+          "system_prompt": "You are a helpful assistant with access to three tools: a diet advisor, a text summarizer, and a calculator. Always use the appropriate tool to answer the user's request. Be concise and factual.",
+          "tool_execution_mode": "sequential"
+        },
+        "description": "Routes to the right specialized agent based on the user message",
+        "module": "nodes.n_orchestrator_agent_2",
+        "name": "n_orchestrator_agent_2",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Multi-Tool Orchestrator",
+        "type": "ORCHESTRATOR_AGENT"
+      }
+    ],
+    "schema_version": 1,
+    "terminal_node": "n_end_1",
+    "workflow": {
+      "canvas_version": 2,
+      "description": "Seed workflow: orchestrator",
+      "name": "orchestrator",
+      "slug": "orchestrator",
+      "version_id": "golden-version-id"
+    }
+  },
+  "warnings": []
+}

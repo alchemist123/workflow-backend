@@ -43,5 +43,3 @@ class MergeNode(NodeDefinition):
         self.output_schema = {"type": "object"}
         self.output_handles = ["output"]
 
-    async def execute(self, node_config: dict, input_data: dict, context: Any) -> dict:
-        return input_data

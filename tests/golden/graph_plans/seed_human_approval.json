@@ -1,0 +1,315 @@
+{
+  "plan": {
+    "edges": [
+      {
+        "from": "START",
+        "route": null,
+        "to": "a2a_start"
+      },
+      {
+        "from": "a2a_start",
+        "route": null,
+        "to": "n_condition_7"
+      },
+      {
+        "from": "n_condition_7",
+        "route": "large",
+        "to": "n_human_approval_5"
+      },
+      {
+        "from": "n_condition_7",
+        "route": "small",
+        "to": "n_transform_1"
+      },
+      {
+        "from": "n_human_approval_5",
+        "route": "approved",
+        "to": "n_human_input_3"
+      },
+      {
+        "from": "n_human_approval_5",
+        "route": "rejected",
+        "to": "n_transform_2"
+      },
+      {
+        "from": "n_human_input_3",
+        "route": null,
+        "to": "n_transform_6"
+      },
+      {
+        "from": "n_transform_1",
+        "route": null,
+        "to": "n_end_4"
+      },
+      {
+        "from": "n_transform_2",
+        "route": null,
+        "to": "n_end_4"
+      },
+      {
+        "from": "n_transform_6",
+        "route": null,
+        "to": "n_end_4"
+      }
+    ],
+    "entry_node": "a2a_start",
+    "env_keys": [
+      {
+        "default": "8080",
+        "description": "Port the agent listens on.",
+        "key": "PORT",
+        "needed_by": [
+          "serving"
+        ],
+        "required": false
+      },
+      {
+        "default": "human_approval",
+        "description": "Advertised agent name.",
+        "key": "AGENT_NAME",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "description": "Advertised description.",
+        "key": "AGENT_DESCRIPTION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "1.0.0",
+        "description": "Advertised version.",
+        "key": "AGENT_VERSION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "",
+        "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost.",
+        "key": "CLOUD_RUN_URL",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": false
+      },
+      {
+        "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+        "key": "A2A_AUTH_TOKEN",
+        "needed_by": [
+          "inbound_auth"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+        "key": "TASK_STORE_DSN",
+        "needed_by": [
+          "task_persistence"
+        ],
+        "required": false,
+        "secret": true
+      }
+    ],
+    "join_nodes": [],
+    "nodes": [
+      {
+        "canvas_id": "trigger",
+        "config": {
+          "input_mode": "json",
+          "payload_schema": {
+            "fields": [
+              {
+                "description": "Amount being claimed",
+                "name": "amount",
+                "required": true,
+                "type": "number"
+              },
+              {
+                "description": "What the money is for",
+                "name": "reason",
+                "required": true,
+                "type": "text"
+              }
+            ]
+          },
+          "state_key": "wf"
+        },
+        "is_entry": true,
+        "module": "nodes.a2a_start",
+        "name": "a2a_start",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Expense Request",
+        "type": "A2A_START"
+      },
+      {
+        "canvas_id": "size",
+        "config": {
+          "branches": [
+            {
+              "expression": "data.get('amount', 0) >= 1000",
+              "name": "large"
+            },
+            {
+              "expression": "True",
+              "name": "small"
+            }
+          ]
+        },
+        "module": "nodes.n_condition_7",
+        "name": "n_condition_7",
+        "on_error": "fail",
+        "retries": 1,
+        "routes": [
+          "large",
+          "small"
+        ],
+        "timeout": 120,
+        "title": "Needs approval?",
+        "type": "CONDITION"
+      },
+      {
+        "canvas_id": "end",
+        "config": {
+          "output_mapping": {}
+        },
+        "is_terminal": true,
+        "module": "nodes.n_end_4",
+        "name": "n_end_4",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "End",
+        "type": "END"
+      },
+      {
+        "canvas_id": "gate",
+        "config": {
+          "assignees": [
+            "finance@example.com"
+          ],
+          "collect_fields": {
+            "fields": [
+              {
+                "description": "Which cost centre to charge",
+                "name": "cost_centre",
+                "required": true,
+                "type": "string"
+              }
+            ]
+          },
+          "prompt": "This expense is over the auto-approval limit. Approve it?"
+        },
+        "module": "nodes.n_human_approval_5",
+        "name": "n_human_approval_5",
+        "on_error": "fail",
+        "retries": 1,
+        "routes": [
+          "approved",
+          "rejected"
+        ],
+        "timeout": 120,
+        "title": "Finance Sign-off",
+        "type": "HUMAN_APPROVAL"
+      },
+      {
+        "canvas_id": "details",
+        "config": {
+          "assignees": [
+            "accounts@example.com"
+          ],
+          "collect_fields": {
+            "fields": [
+              {
+                "description": "Account to pay from",
+                "name": "account",
+                "required": true,
+                "type": "string"
+              },
+              {
+                "description": "Date to pay (YYYY-MM-DD)",
+                "name": "pay_on",
+                "required": true,
+                "type": "string"
+              },
+              {
+                "description": "Anything the payment run should know",
+                "name": "note",
+                "required": false,
+                "type": "text"
+              }
+            ]
+          },
+          "prompt": "Approved. Where should this be paid from, and when?"
+        },
+        "module": "nodes.n_human_input_3",
+        "name": "n_human_input_3",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Payment Details",
+        "type": "HUMAN_INPUT"
+      },
+      {
+        "canvas_id": "auto",
+        "config": {
+          "expression": "result = {'outcome': 'paid', 'approved_by': 'policy'}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_1",
+        "name": "n_transform_1",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Auto-approve",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "declined",
+        "config": {
+          "expression": "result = {'outcome': 'declined', 'why': data.get('comment')}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_2",
+        "name": "n_transform_2",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Record Decline",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "paid",
+        "config": {
+          "expression": "result = {'outcome': 'paid', 'cost_centre': data.get('cost_centre'), 'account': data.get('account'), 'pay_on': data.get('pay_on'), 'approved_by': 'finance'}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_6",
+        "name": "n_transform_6",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Record Payment",
+        "type": "TRANSFORM"
+      }
+    ],
+    "schema_version": 1,
+    "terminal_node": "n_end_4",
+    "workflow": {
+      "canvas_version": 2,
+      "description": "Seed workflow: human_approval",
+      "name": "human_approval",
+      "slug": "human_approval",
+      "version_id": "golden-version-id"
+    }
+  },
+  "warnings": []
+}

@@ -1,0 +1,65 @@
+{% include "nodes/_header.j2" %}
+from google.adk import Event
+from google.adk.agents.context import Context
+from google.adk.workflow import node
+
+from core.config import settings
+from core.logging import node_logger
+from core.state import as_text, merge_state
+from nodes.base import NODE_KWARGS, node_error
+from tools import a2a as a2a_tools
+
+NODE_ID = {{ node.name | tojson }}
+ON_ERROR = {{ node.on_error | tojson }}
+
+AGENT_LABEL = {{ agent_label | tojson }}
+
+# Endpoint and token come from the environment, with no literal fallback: an
+# endpoint can embed credentials and a token plainly is one, and this file is
+# committed to git. The canvas values are written into `.env` (gitignored) as
+# these variables' defaults.
+ENDPOINT_ENV_KEY = {{ endpoint_env_key | tojson }}
+TOKEN_ENV_KEY = {{ token_env_key | tojson }}
+
+# Which payload key carries the message sent to the remote agent. When it is
+# absent the whole payload is sent as JSON.
+MESSAGE_KEY = {{ message_key | tojson }}
+# Where the remote's answer is written into the payload.
+OUTPUT_KEY = {{ output_key | tojson }}
+
+log = node_logger(NODE_ID)
+
+
+@node(name=NODE_ID, **NODE_KWARGS({{ node_kwargs }}))
+async def {{ node.name }}(ctx: Context, node_input=None):
+    data = node_input or {}
+    endpoint = settings.env_value(ENDPOINT_ENV_KEY)
+    if not endpoint:
+        message = f"{NODE_ID}: no endpoint for {AGENT_LABEL}. Set {ENDPOINT_ENV_KEY} in .env."
+        if ON_ERROR != "continue":
+            raise ValueError(message)
+        return node_error(NODE_ID, ValueError(message))
+
+    token = settings.env_value(TOKEN_ENV_KEY)
+    payload = data.get(MESSAGE_KEY) if MESSAGE_KEY in data else data
+    message = payload if isinstance(payload, str) else as_text(payload)
+
+    log.info("delegating to %s", AGENT_LABEL)
+    try:
+        # Blocking message/send: the remote runs to completion before replying.
+        # For a remote that takes longer than one request should, swap this for
+        # tools.a2a.submit_task + get_task polling.
+        result = await a2a_tools.send_message(endpoint, message, token)
+    except Exception as exc:  # noqa: BLE001
+        if ON_ERROR != "continue":
+            raise
+        return node_error(NODE_ID, exc)
+
+    if "error" in result:
+        if ON_ERROR != "continue":
+            raise RuntimeError(f"{NODE_ID}: {result['error']}")
+        return node_error(NODE_ID, RuntimeError(result["error"]))
+
+    out = {OUTPUT_KEY: result.get("result")}
+    merge_state(ctx, out)
+    return Event(output={**data, **out})

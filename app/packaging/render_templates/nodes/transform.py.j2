@@ -1,0 +1,70 @@
+{% include "nodes/_header.j2" %}
+{% if mode == "jmespath" %}
+import jmespath
+{% elif mode == "jinja2" %}
+from jinja2.sandbox import SandboxedEnvironment
+{% endif %}
+from google.adk import Event
+from google.adk.agents.context import Context
+from google.adk.workflow import node
+
+from core.logging import node_logger
+from core.state import merge_state
+from nodes.base import NODE_KWARGS, node_error
+
+NODE_ID = {{ node.name | tojson }}
+ON_ERROR = {{ node.on_error | tojson }}
+{% if mode == "jmespath" %}
+EXPRESSION = {{ expression | tojson }}
+{% elif mode == "jinja2" %}
+TEMPLATE = {{ expression | tojson }}
+{% endif %}
+{% if output_key %}
+OUTPUT_KEY = {{ output_key | tojson }}
+{% endif %}
+
+log = node_logger(NODE_ID)
+
+
+def _transform(data: dict) -> dict:
+    """The canvas expression, emitted as ordinary Python."""
+{% if mode == "jmespath" %}
+    found = jmespath.search(EXPRESSION, data)
+{% if output_key %}
+    return {OUTPUT_KEY: found} if found is not None else {}
+{% else %}
+    if isinstance(found, dict):
+        return found
+    return {"result": found} if found is not None else {}
+{% endif %}
+{% elif mode == "jinja2" %}
+    rendered = SandboxedEnvironment().from_string(TEMPLATE).render(**data)
+    import json
+
+    try:
+        parsed = json.loads(rendered)
+    except ValueError:
+        return {"result": rendered}
+    return parsed if isinstance(parsed, dict) else {"result": parsed}
+{% else %}
+    result = None
+{{ python_body }}
+    if isinstance(result, dict):
+        return result
+    return {"result": result} if result is not None else {}
+{% endif %}
+
+
+@node(name=NODE_ID, **NODE_KWARGS({{ node_kwargs }}))
+async def {{ node.name }}(ctx: Context, node_input=None):
+    data = node_input or {}
+    try:
+        result = _transform(data)
+    except Exception as exc:  # noqa: BLE001
+        if ON_ERROR != "continue":
+            raise
+        return node_error(NODE_ID, exc)
+
+    log.info("transformed %d key(s) into %d", len(data), len(result))
+    merge_state(ctx, result)
+    return Event(output={**data, **result})

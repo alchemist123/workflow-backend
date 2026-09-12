@@ -16,6 +16,8 @@ _SAFE_BUILTINS = {
 @dataclass
 class FunctionNode(NodeDefinition):
     node_type: str = "FUNCTION"
+    provides_tool: bool = True
+    supports_on_error_continue: bool = True
     version: str = "1"
     palette: PaletteMetadata = None
     config_schema: dict = None
@@ -58,11 +60,3 @@ class FunctionNode(NodeDefinition):
         self.output_schema = {"type": "object"}
         self.output_handles = ["output", "error"]
 
-    async def execute(self, node_config: dict, input_data: dict, context: Any) -> dict:
-        code = node_config.get("code", "result = data")
-        local_ns = {**input_data, "data": input_data, "input_data": input_data}
-        exec(compile(code, "<function>", "exec"), dict(_SAFE_BUILTINS), local_ns)
-        result = local_ns.get("result", local_ns.get("output"))
-        if isinstance(result, dict):
-            return result
-        return {"result": result}

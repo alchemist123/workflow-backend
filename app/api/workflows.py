@@ -5,11 +5,12 @@ from sqlalchemy import select, func
 from app.database import get_db
 from app.models.workflow import Workflow, WorkflowVersion, WorkflowExecution, ExecutionStatus, WorkflowStatus
 from app.schemas.workflow import (
+    AnswerRequest,
     WorkflowCreate, WorkflowUpdate, WorkflowRead, WorkflowVersionRead,
-    SaveCanvasRequest, CompileResponse, ExecutionRead,
+    SaveCanvasRequest, CompileResponse, ExecutionRead, TestRunRequest,
 )
 from app.compiler import run_compiler
-from app.runtime.engine import WorkflowEngine
+from app.compiler.canvas_migrations import migrate_canvas, needs_migration
 from app.nodes.registry import get_palette
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
@@ -106,7 +107,7 @@ async def list_versions(workflow_id: str, db: AsyncSession = Depends(get_db)):
         .where(WorkflowVersion.workflow_id == workflow_id)
         .order_by(WorkflowVersion.version_number.desc())
     )
-    return result.scalars().all()
+    return [_read_version(v) for v in result.scalars().all()]
 
 
 @router.get("/{workflow_id}/versions/{version_id}", response_model=WorkflowVersionRead)
@@ -118,18 +119,26 @@ async def get_version(workflow_id: str, version_id: str, db: AsyncSession = Depe
     version = result.scalar_one_or_none()
     if not version:
         raise HTTPException(status_code=404, detail="Version not found")
-    return version
+    return _read_version(version)
 
 
-@router.post("/{workflow_id}/versions/{version_id}/execute", response_model=ExecutionRead)
-async def execute_workflow(
+@router.post("/{workflow_id}/versions/{version_id}/test", response_model=ExecutionRead)
+async def test_workflow(
     workflow_id: str,
     version_id: str,
-    payload: dict = None,
+    body: TestRunRequest | None = None,
     background_tasks: BackgroundTasks = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Start an asynchronous workflow execution."""
+    """Run this version by driving its generated package.
+
+    Unlike `/execute`, which runs the platform's own engine, this renders the
+    package and drives it over its A2A surface — so a test exercises the exact
+    artefact that ships. The run is recorded as a WorkflowExecution with
+    per-node logs, which the existing polling and canvas overlay already read.
+    """
+    request = body or TestRunRequest()
+
     result = await db.execute(
         select(WorkflowVersion)
         .where(WorkflowVersion.id == version_id, WorkflowVersion.workflow_id == workflow_id)
@@ -137,41 +146,223 @@ async def execute_workflow(
     version = result.scalar_one_or_none()
     if not version:
         raise HTTPException(status_code=404, detail="Version not found")
-    if not version.is_valid:
-        raise HTTPException(status_code=422, detail="Version has validation errors and cannot be executed")
+    if not version.is_valid or not version.ir_json:
+        raise HTTPException(
+            status_code=422,
+            detail="This version has validation errors. Save & Compile before testing it.",
+        )
 
-    # Wrap the raw payload as an HTTP trigger envelope so trigger nodes see body/headers/query
-    wrapped_payload = {
-        "body": payload or {},
-        "headers": {},
-        "query": {},
-        "method": "POST",
-    }
+    wf = await _get_or_404(db, Workflow, workflow_id)
+    plan = _graph_plan_for(version, wf)
 
     execution = WorkflowExecution(
         id=str(uuid.uuid4()),
         workflow_id=workflow_id,
         version_id=version_id,
         status=ExecutionStatus.PENDING,
-        trigger_payload=wrapped_payload,
+        trigger_payload={"payload": request.payload, "mode": request.mode},
     )
     db.add(execution)
-    # Commit now so the execution row exists before the background task starts.
-    # In Starlette 1.x background tasks run before dependency teardown, meaning
-    # the get_db auto-commit would fire after the background task's first DB write.
+    # Commit before the background task starts: Starlette runs background tasks
+    # before dependency teardown, so get_db's auto-commit would land after the
+    # task's first write.
     await db.commit()
 
-    background_tasks.add_task(_run_execution, execution.id, version.ir_json, wrapped_payload)
+    background_tasks.add_task(
+        _run_package_test, execution.id, plan, request.payload, request.mode, request.rebuild
+    )
     return execution
 
 
-async def _run_execution(execution_id: str, ir_dict: dict, payload: dict):
+async def _run_package_test(
+    execution_id: str,
+    plan,
+    payload: dict,
+    mode: str,
+    rebuild: bool,
+    answer: dict | None = None,
+) -> None:
+    """Drive the package and record the run against the execution row."""
+    from datetime import datetime
+
     from app.database import AsyncSessionLocal
-    from app.compiler.ir import IR
+    from app.runtime.package_runner import run_workflow_package
+
     async with AsyncSessionLocal() as session:
-        engine = WorkflowEngine(db_session=session)
-        ir = IR.from_dict(ir_dict)
-        await engine.execute(ir, execution_id, payload)
+        execution = await session.get(WorkflowExecution, execution_id)
+        if execution is None:
+            return
+        execution.status = ExecutionStatus.RUNNING
+        execution.started_at = datetime.utcnow()
+        await session.commit()
+
+    run = await run_workflow_package(
+        plan, payload, mode=mode, rebuild=rebuild, answer=answer
+    )
+    await _record_run(execution_id, run)
+
+
+async def _resume_package_test(
+    execution_id: str,
+    plan,
+    task_id: str,
+    context_id: str | None,
+    interrupt_id: str,
+    response: dict,
+) -> None:
+    """Answer a parked task and record the run that follows."""
+    from app.database import AsyncSessionLocal
+    from app.runtime.package_runner import resume_workflow_package
+
+    async with AsyncSessionLocal() as session:
+        execution = await session.get(WorkflowExecution, execution_id)
+        if execution is None:
+            return
+        execution.status = ExecutionStatus.RUNNING
+        await session.commit()
+
+    run = await resume_workflow_package(
+        plan,
+        task_id=task_id,
+        context_id=context_id,
+        interrupt_id=interrupt_id,
+        response=response,
+    )
+    await _record_run(execution_id, run)
+
+
+async def _record_run(execution_id: str, run) -> None:
+    """Write one RunResult onto its execution row, with per-node logs."""
+    from datetime import datetime
+
+    from app.database import AsyncSessionLocal
+    from app.models.workflow import NodeExecutionLog
+
+    async with AsyncSessionLocal() as session:
+        execution = await session.get(WorkflowExecution, execution_id)
+        if execution is None:
+            return
+
+        # A workflow waiting on a human is neither finished nor broken, and
+        # the status enum already has the right word for it. Recording it as
+        # FAILED would send the user looking for a bug that is not there.
+        if run.input_required:
+            execution.status = ExecutionStatus.WAITING
+        else:
+            execution.status = (
+                ExecutionStatus.SUCCESS if run.ok else ExecutionStatus.FAILED
+            )
+        execution.finished_at = datetime.utcnow()
+        execution.error = run.error
+        execution.output = {
+            "result": run.result,
+            "a2a": {
+                "task_id": run.task_id,
+                # Needed to answer this task later, so it has to be recorded
+                # at the moment the run parks.
+                "context_id": run.context_id,
+                "state": run.state,
+                "mode": run.mode,
+                "polls": run.polls,
+            },
+            "duration_ms": run.duration_ms,
+            "package_dir": run.package_dir,
+            "warnings": run.warnings,
+            # Present when the run parked on a HUMAN_APPROVAL node.
+            "input_required": run.input_required,
+        }
+
+        # One log row per node event, keyed by canvas node so the existing
+        # /node_logs endpoint and the canvas overlay work unchanged. A looping
+        # node produces one row per iteration.
+        finished = datetime.utcnow()
+        for step in run.steps:
+            if not step.canvas_id:
+                continue
+            session.add(
+                NodeExecutionLog(
+                    id=str(uuid.uuid4()),
+                    execution_id=execution_id,
+                    node_id=step.canvas_id,
+                    node_type=step.node_type or "",
+                    status=ExecutionStatus.FAILED if step.error else ExecutionStatus.SUCCESS,
+                    output_data=step.output if isinstance(step.output, dict) else {"value": step.output},
+                    error=step.error,
+                    started_at=finished,
+                    finished_at=finished,
+                )
+            )
+        await session.commit()
+
+
+@router.post(
+    "/{workflow_id}/executions/{execution_id}/answer", response_model=ExecutionRead
+)
+async def answer_execution(
+    workflow_id: str,
+    execution_id: str,
+    body: AnswerRequest,
+    background_tasks: BackgroundTasks = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Answer a run that parked on a HUMAN_APPROVAL node.
+
+    A real resume: `run_once.py` keeps the A2A task and the ADK session in a
+    SQLite file beside the package, so the workflow carries on from the
+    approval node and nothing before it runs a second time.
+
+    The original execution row is reused, so one decision shows as one run.
+    """
+    execution = await db.get(WorkflowExecution, execution_id)
+    if not execution or execution.workflow_id != workflow_id:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if execution.status != ExecutionStatus.WAITING:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This run is {execution.status.value}, not waiting for input. "
+                "Only a run parked on a human approval can be answered."
+            ),
+        )
+
+    result = await db.execute(
+        select(WorkflowVersion).where(WorkflowVersion.id == execution.version_id)
+    )
+    version = result.scalar_one_or_none()
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+
+    wf = await _get_or_404(db, Workflow, workflow_id)
+    plan = _graph_plan_for(version, wf)
+
+    # The ids of the task this run parked on, recorded when it parked.
+    output = execution.output or {}
+    pending = output.get("input_required") or {}
+    task_id = (output.get("a2a") or {}).get("task_id")
+    interrupt_id = pending.get("interrupt_id")
+    if not task_id or not interrupt_id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This run did not record what it was waiting for, so it cannot "
+                "be resumed. Run it again."
+            ),
+        )
+
+    execution.status = ExecutionStatus.PENDING
+    execution.error = None
+    await db.commit()
+
+    background_tasks.add_task(
+        _resume_package_test,
+        execution.id,
+        plan,
+        task_id,
+        output.get("context_id") or (output.get("a2a") or {}).get("context_id"),
+        interrupt_id,
+        body.response,
+    )
+    return execution
 
 
 @router.get("/{workflow_id}/executions", response_model=list[ExecutionRead])
@@ -243,16 +434,94 @@ async def package_workflow(
         raise HTTPException(status_code=422, detail="Version must be valid and compiled before packaging")
 
     wf = await _get_or_404(db, Workflow, workflow_id)
-    workflow_name = (wf.name or "workflow").lower().replace(" ", "-")
+    # The display name is passed through as-is: the graph plan derives its own
+    # Python identifier (workflow_slug) for the ADK graph and AGENT_NAME, and
+    # the builder derives the directory slug. Pre-mangling it here would only
+    # put a hyphenated name on the agent card.
+    workflow_name = wf.name or "workflow"
 
-    from app.packaging.builder import build_runner_package
+    plan = _graph_plan_for(version, wf)
+
+    # Rendering shells out (byte-compile, import probe, ruff, git), so keep it
+    # off the event loop.
     import asyncio
-    loop = asyncio.get_event_loop()
-    pkg = await loop.run_in_executor(None, build_runner_package, version.ir_json, version_id, workflow_name)
+    import functools
+
+    from app.packaging.builder import RenderError, build_runner_package
+
+    loop = asyncio.get_running_loop()
+    try:
+        pkg = await loop.run_in_executor(
+            None, functools.partial(build_runner_package, plan, workflow_name=workflow_name)
+        )
+    except RenderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return pkg
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _graph_plan_for(version: WorkflowVersion, workflow: Workflow):
+    """Compile a stored version into an ADK graph plan, or raise 422.
+
+    Shared by /test and /package so a workflow is never tested against a
+    different plan than the one that would be packaged.
+    """
+    from app.compiler import GraphPlanError, build_graph_plan
+    from app.compiler.graph_check import verify_plan_builds
+    from app.compiler.ir import IR
+
+    try:
+        plan = build_graph_plan(
+            IR.from_dict(version.ir_json),
+            workflow_name=workflow.name or "workflow",
+            workflow_description=workflow.description or "",
+            canvas_schema_version=(version.canvas_json or {}).get("schema_version", 1),
+        )
+    except GraphPlanError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Let ADK's own validator judge the graph before anything is rendered.
+    graph_errors = verify_plan_builds(plan)
+    if graph_errors:
+        raise HTTPException(status_code=422, detail=" ".join(graph_errors))
+
+    if plan.unsupported:
+        listed = ", ".join(f"'{n.canvas_id}' ({n.node_type})" for n in plan.unsupported)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"These nodes cannot be packaged yet: {listed}. "
+                "Remove them or replace them with supported nodes."
+            ),
+        )
+    return plan
+
+
+def _read_version(version: WorkflowVersion) -> WorkflowVersionRead:
+    """Serialise a stored version, migrating its canvas to the current schema.
+
+    Applied on read so an old workflow opens correctly without waiting for the
+    backfill (scripts/migrate_canvases.py). Deliberately builds a new response
+    object rather than assigning to `version.canvas_json`: get_db commits at the
+    end of every request, so mutating the ORM instance would turn this GET into
+    a silent write. Re-saving from the UI is what persists the migration, along
+    with a freshly compiled IR.
+    """
+    read = WorkflowVersionRead.model_validate(version)
+    if isinstance(read.canvas_json, dict) and needs_migration(read.canvas_json):
+        migrated, notes = migrate_canvas(read.canvas_json)
+        read.canvas_json = migrated
+        # An old canvas has an IR compiled against node types that no longer
+        # exist, so it cannot be executed or packaged until it is re-saved.
+        read.is_valid = False
+        read.validation_errors = [
+            "This workflow was built before the move to A2A graph workflows and "
+            "has been migrated. Save & Compile to apply it.",
+            *(f"Migration: {note}" for note in notes),
+        ]
+    return read
 
 async def _get_or_404(db: AsyncSession, model, id: str):
     result = await db.execute(select(model).where(model.id == id))

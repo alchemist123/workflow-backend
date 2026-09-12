@@ -1,0 +1,27 @@
+# Runtime dependencies for a generated ADK graph workflow agent.
+# The generator trims this to the node types the workflow actually uses.
+
+# ── Google ADK: graph workflows + the A2A server ─────────────────────────────
+google-adk>=2.8,<3
+
+# a2a-sdk is pinned below 1.0 deliberately: 1.x replaced the pydantic AgentCard
+# with a protobuf message that has no `url`, `preferred_transport` or
+# `protocol_version`, so core/agent_card.py would not build there. ADK supports
+# both generations, so without this pin the install silently resolves to 1.x.
+a2a-sdk[http-server]>=0.3.4,<1.0
+
+# ── Config ───────────────────────────────────────────────────────────────────
+pydantic>=2.12,<3
+pydantic-settings>=2.2.1
+
+# ── Serving ──────────────────────────────────────────────────────────────────
+uvicorn[standard]>=0.34,<1.0
+
+# ── HTTP client, for REMOTE_AGENT nodes and A2A tools ────────────────────────
+httpx>=0.27,<1.0
+
+# ── MCP client, for TOOL / DATASOURCE nodes ──────────────────────────────────
+# mcp 2.x renamed streamablehttp_client; tools/mcp.py accepts either, but the
+# pin keeps a generated package on the tested surface.
+mcp>=1.9,<2
+

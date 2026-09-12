@@ -1,0 +1,400 @@
+{
+  "plan": {
+    "edges": [
+      {
+        "from": "START",
+        "route": null,
+        "to": "a2a_start"
+      },
+      {
+        "from": "a2a_start",
+        "route": null,
+        "to": "n_orchestrator_agent_2"
+      },
+      {
+        "from": "n_orchestrator_agent_2",
+        "route": null,
+        "to": "n_end_1"
+      }
+    ],
+    "entry_node": "a2a_start",
+    "env_keys": [
+      {
+        "default": "8080",
+        "description": "Port the agent listens on.",
+        "key": "PORT",
+        "needed_by": [
+          "serving"
+        ],
+        "required": false
+      },
+      {
+        "default": "sub_agents",
+        "description": "Advertised agent name.",
+        "key": "AGENT_NAME",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "description": "Advertised description.",
+        "key": "AGENT_DESCRIPTION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "1.0.0",
+        "description": "Advertised version.",
+        "key": "AGENT_VERSION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "",
+        "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost.",
+        "key": "CLOUD_RUN_URL",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": false
+      },
+      {
+        "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+        "key": "A2A_AUTH_TOKEN",
+        "needed_by": [
+          "inbound_auth"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+        "key": "TASK_STORE_DSN",
+        "needed_by": [
+          "task_persistence"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "default": "",
+        "description": "GCP project for Vertex AI.",
+        "key": "GOOGLE_CLOUD_PROJECT",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": true
+      },
+      {
+        "default": "us-central1",
+        "description": "Vertex AI region.",
+        "key": "VERTEX_AI_LOCATION",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false
+      },
+      {
+        "default": "gemini-2.5-flash",
+        "description": "Default model.",
+        "key": "LLM_MODEL",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false
+      },
+      {
+        "default": "TRUE",
+        "description": "TRUE routes through Vertex AI; unset uses an AI Studio key.",
+        "key": "GOOGLE_GENAI_USE_VERTEXAI",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false
+      },
+      {
+        "description": "Service account key as one line. Blank uses Application Default Credentials, which is the usual choice on Cloud Run.",
+        "key": "GOOGLE_SERVICE_ACCOUNT_JSON",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "AI Studio key, as an alternative to Vertex AI for local development.",
+        "key": "GOOGLE_API_KEY",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "MCP server URL for 'Grammar MCP'.",
+        "key": "MCP_GRAMMAR_MCP_URL",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": true,
+        "secret": true
+      },
+      {
+        "description": "Bearer token for 'Grammar MCP', if it needs one.",
+        "key": "MCP_GRAMMAR_MCP_TOKEN",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "MCP server URL for 'Weather MCP'.",
+        "key": "MCP_WEATHER_MCP_URL",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": true,
+        "secret": true
+      },
+      {
+        "description": "Bearer token for 'Weather MCP', if it needs one.",
+        "key": "MCP_WEATHER_MCP_TOKEN",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "default": "streamable_http",
+        "description": "MCP transport for every configured server.",
+        "key": "MCP_TRANSPORT",
+        "needed_by": [
+          "n_orchestrator_agent_2"
+        ],
+        "required": false
+      }
+    ],
+    "join_nodes": [],
+    "nodes": [
+      {
+        "canvas_id": "trigger",
+        "config": {
+          "input_mode": "json",
+          "payload_schema": {
+            "fields": [
+              {
+                "description": "What the user wants planned or written",
+                "name": "request",
+                "required": true,
+                "type": "text"
+              }
+            ]
+          },
+          "state_key": "wf"
+        },
+        "is_entry": true,
+        "module": "nodes.a2a_start",
+        "name": "a2a_start",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "A2A Start",
+        "type": "A2A_START"
+      },
+      {
+        "canvas_id": "end",
+        "config": {
+          "output_mapping": {
+            "result": "answer"
+          }
+        },
+        "is_terminal": true,
+        "module": "nodes.n_end_1",
+        "name": "n_end_1",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "End",
+        "type": "END"
+      },
+      {
+        "canvas_id": "orchestrator",
+        "config": {
+          "model": "gemini-2.5-flash",
+          "resolved_tools": {
+            "a2a_agents": [],
+            "agents": [
+              {
+                "description": "Plans a short trip for a city and a number of days.",
+                "input_schema": {
+                  "properties": {
+                    "city": {
+                      "description": "Destination city",
+                      "type": "string"
+                    },
+                    "days": {
+                      "description": "Trip length in days",
+                      "type": "integer"
+                    },
+                    "interests": {
+                      "description": "What the traveller enjoys",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "city",
+                    "days"
+                  ],
+                  "type": "object"
+                },
+                "instruction": "Plan a trip. Use the weather tool before recommending outdoor activities.",
+                "kind": "agent",
+                "max_tokens": null,
+                "model": "gemini-2.5-flash",
+                "name": "trip_planner",
+                "node_id": "planner",
+                "node_type": "LLM_AGENT",
+                "output_key": "trip",
+                "output_schema": {
+                  "properties": {
+                    "itinerary": {
+                      "description": "Day-by-day plan",
+                      "type": "string"
+                    },
+                    "packing_list": {
+                      "description": "What to bring",
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "itinerary"
+                  ],
+                  "type": "object"
+                },
+                "provider": "vertex_ai",
+                "temperature": null,
+                "tools": {
+                  "a2a_agents": [],
+                  "agents": [],
+                  "functions": [],
+                  "groups": [],
+                  "mcp_servers": [
+                    {
+                      "auth_token_env": "MCP_WEATHER_MCP_TOKEN",
+                      "kind": "mcp",
+                      "name": "Weather MCP",
+                      "node_id": "weather",
+                      "node_type": "TOOL",
+                      "tool_name": "get_forecast",
+                      "transport": "http",
+                      "url_env": "MCP_WEATHER_MCP_URL"
+                    }
+                  ]
+                }
+              }
+            ],
+            "functions": [],
+            "groups": [
+              {
+                "children": [
+                  {
+                    "auth_token_env": "MCP_GRAMMAR_MCP_TOKEN",
+                    "kind": "mcp",
+                    "name": "Grammar MCP",
+                    "node_id": "grammar",
+                    "node_type": "TOOL",
+                    "tool_name": "check_grammar",
+                    "transport": "http",
+                    "url_env": "MCP_GRAMMAR_MCP_URL"
+                  },
+                  {
+                    "description": "Rewrites text in a consistent house style.",
+                    "input_schema": {
+                      "properties": {
+                        "style": {
+                          "description": "House style to apply",
+                          "type": "string"
+                        },
+                        "text": {
+                          "description": "The text to rewrite",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "text"
+                      ],
+                      "type": "object"
+                    },
+                    "instruction": "Rewrite the text clearly and concisely.",
+                    "kind": "agent",
+                    "max_tokens": null,
+                    "model": "gemini-2.5-flash",
+                    "name": "editor",
+                    "node_id": "editor",
+                    "node_type": "LLM_AGENT",
+                    "output_key": "",
+                    "output_schema": {
+                      "properties": {
+                        "rewritten": {
+                          "description": "The rewritten text",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "rewritten"
+                      ],
+                      "type": "object"
+                    },
+                    "provider": "vertex_ai",
+                    "temperature": null,
+                    "tools": {
+                      "a2a_agents": [],
+                      "agents": [],
+                      "functions": [],
+                      "groups": [],
+                      "mcp_servers": []
+                    }
+                  }
+                ],
+                "description": "Check grammar, then rewrite the text in a house style.",
+                "kind": "group",
+                "max_concurrency": 0,
+                "mode": "sequential",
+                "name": "polish_text",
+                "node_id": "polish",
+                "node_type": "SEQUENTIAL_AGENT",
+                "stop_on_error": true
+              }
+            ],
+            "mcp_servers": []
+          },
+          "system_prompt": "Answer the user's request. You can call a trip planner and a polish pipeline. Pass them proper arguments \u2014 they declare what they need."
+        },
+        "module": "nodes.n_orchestrator_agent_2",
+        "name": "n_orchestrator_agent_2",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Orchestrator",
+        "type": "ORCHESTRATOR_AGENT"
+      }
+    ],
+    "schema_version": 1,
+    "terminal_node": "n_end_1",
+    "workflow": {
+      "canvas_version": 2,
+      "description": "Seed workflow: sub_agents",
+      "name": "sub_agents",
+      "slug": "sub_agents",
+      "version_id": "golden-version-id"
+    }
+  },
+  "warnings": []
+}

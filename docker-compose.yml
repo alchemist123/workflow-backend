@@ -28,7 +28,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/nocode
       REDIS_URL: redis://redis:6379/0
       PACKAGES_DIR: /packages
-      HOST_PACKAGES_DIR: /Users/amalvs/Documents/projects/no-code-platform/backend/packages
+      # The packages directory as the *host* sees it, for the copyable path
+      # and compose command the UI shows. Derived from where compose runs, so
+      # it follows the checkout instead of being pinned to one machine.
+      HOST_PACKAGES_DIR: ${PWD}/packages
       GOOGLE_CLOUD_PROJECT: arabbank-dev-agentic-prj
       VERTEX_AI_LOCATION: us-central1
       GOOGLE_APPLICATION_CREDENTIALS: /root/.config/gcloud/application_default_credentials.json

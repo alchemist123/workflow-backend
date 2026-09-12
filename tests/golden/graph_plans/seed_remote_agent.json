@@ -1,0 +1,235 @@
+{
+  "plan": {
+    "edges": [
+      {
+        "from": "START",
+        "route": null,
+        "to": "a2a_start"
+      },
+      {
+        "from": "a2a_start",
+        "route": null,
+        "to": "n_remote_agent_1"
+      },
+      {
+        "from": "n_remote_agent_1",
+        "route": null,
+        "to": "n_remote_agent_3"
+      },
+      {
+        "from": "n_remote_agent_3",
+        "route": null,
+        "to": "n_transform_4"
+      },
+      {
+        "from": "n_transform_4",
+        "route": null,
+        "to": "n_end_2"
+      }
+    ],
+    "entry_node": "a2a_start",
+    "env_keys": [
+      {
+        "default": "8080",
+        "description": "Port the agent listens on.",
+        "key": "PORT",
+        "needed_by": [
+          "serving"
+        ],
+        "required": false
+      },
+      {
+        "default": "remote_agent",
+        "description": "Advertised agent name.",
+        "key": "AGENT_NAME",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "description": "Advertised description.",
+        "key": "AGENT_DESCRIPTION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "1.0.0",
+        "description": "Advertised version.",
+        "key": "AGENT_VERSION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "",
+        "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost.",
+        "key": "CLOUD_RUN_URL",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": false
+      },
+      {
+        "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+        "key": "A2A_AUTH_TOKEN",
+        "needed_by": [
+          "inbound_auth"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+        "key": "TASK_STORE_DSN",
+        "needed_by": [
+          "task_persistence"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "A2A endpoint for 'Diet Advisor'.",
+        "key": "A2A_DIET_ADVISOR_URL",
+        "needed_by": [
+          "n_remote_agent_1"
+        ],
+        "required": true,
+        "secret": true
+      },
+      {
+        "description": "Bearer token for 'Diet Advisor', if it needs one.",
+        "key": "A2A_DIET_ADVISOR_TOKEN",
+        "needed_by": [
+          "n_remote_agent_1"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "A2A endpoint for 'Sentiment Analyzer'.",
+        "key": "A2A_SENTIMENT_ANALYZER_URL",
+        "needed_by": [
+          "n_remote_agent_3"
+        ],
+        "required": true,
+        "secret": true
+      },
+      {
+        "description": "Bearer token for 'Sentiment Analyzer', if it needs one.",
+        "key": "A2A_SENTIMENT_ANALYZER_TOKEN",
+        "needed_by": [
+          "n_remote_agent_3"
+        ],
+        "required": false,
+        "secret": true
+      }
+    ],
+    "join_nodes": [],
+    "nodes": [
+      {
+        "canvas_id": "trigger",
+        "config": {
+          "input_mode": "json",
+          "payload_schema": {
+            "fields": [
+              {
+                "description": "Text for the remote agents",
+                "name": "message",
+                "required": true,
+                "type": "text"
+              }
+            ]
+          },
+          "state_key": "wf"
+        },
+        "description": "POST /run with {\"message\": \"your diet question\"}",
+        "is_entry": true,
+        "module": "nodes.a2a_start",
+        "name": "a2a_start",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Start",
+        "type": "A2A_START"
+      },
+      {
+        "canvas_id": "end",
+        "is_terminal": true,
+        "module": "nodes.n_end_2",
+        "name": "n_end_2",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 30,
+        "title": "Done",
+        "type": "END"
+      },
+      {
+        "canvas_id": "diet_agent",
+        "config": {
+          "_env": {
+            "auth_token": "A2A_DIET_ADVISOR_TOKEN",
+            "endpoint": "A2A_DIET_ADVISOR_URL"
+          },
+          "description": "Provides evidence-based diet and nutrition tips",
+          "name": "diet_advisor"
+        },
+        "description": "Get a personalized diet tip",
+        "module": "nodes.n_remote_agent_1",
+        "name": "n_remote_agent_1",
+        "on_error": "fail",
+        "retries": 2,
+        "timeout": 30,
+        "title": "Diet Advisor",
+        "type": "REMOTE_AGENT"
+      },
+      {
+        "canvas_id": "sentiment_agent",
+        "config": {
+          "_env": {
+            "auth_token": "A2A_SENTIMENT_ANALYZER_TOKEN",
+            "endpoint": "A2A_SENTIMENT_ANALYZER_URL"
+          },
+          "description": "Analyzes the sentiment of the diet advice response",
+          "name": "sentiment_analyzer"
+        },
+        "description": "Check the tone of the advice",
+        "module": "nodes.n_remote_agent_3",
+        "name": "n_remote_agent_3",
+        "on_error": "fail",
+        "retries": 2,
+        "timeout": 30,
+        "title": "Sentiment Analyzer",
+        "type": "REMOTE_AGENT"
+      },
+      {
+        "canvas_id": "summarize",
+        "config": {
+          "expression": "{sentiment: sentiment, score: score, advice: response, category: category}",
+          "mode": "jmespath"
+        },
+        "description": "Package both results into a single response",
+        "module": "nodes.n_transform_4",
+        "name": "n_transform_4",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 30,
+        "title": "Merge Results",
+        "type": "TRANSFORM"
+      }
+    ],
+    "schema_version": 1,
+    "terminal_node": "n_end_2",
+    "workflow": {
+      "canvas_version": 2,
+      "description": "Seed workflow: remote_agent",
+      "name": "remote_agent",
+      "slug": "remote_agent",
+      "version_id": "golden-version-id"
+    }
+  },
+  "warnings": []
+}
