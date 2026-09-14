@@ -1,0 +1,253 @@
+{
+  "plan": {
+    "edges": [
+      {
+        "from": "START",
+        "route": null,
+        "to": "a2a_start"
+      },
+      {
+        "from": "a2a_start",
+        "route": null,
+        "to": "n_parallel_fork_4"
+      },
+      {
+        "from": "n_merge_5",
+        "route": null,
+        "to": "n_end_3"
+      },
+      {
+        "from": "n_parallel_fork_4",
+        "route": null,
+        "to": "n_wait_7"
+      },
+      {
+        "from": "n_parallel_fork_4",
+        "route": null,
+        "to": "n_wait_2"
+      },
+      {
+        "from": "n_transform_1",
+        "route": null,
+        "to": "n_merge_5"
+      },
+      {
+        "from": "n_transform_6",
+        "route": null,
+        "to": "n_merge_5"
+      },
+      {
+        "from": "n_wait_2",
+        "route": null,
+        "to": "n_transform_6"
+      },
+      {
+        "from": "n_wait_7",
+        "route": null,
+        "to": "n_transform_1"
+      }
+    ],
+    "entry_node": "a2a_start",
+    "env_keys": [
+      {
+        "default": "8080",
+        "description": "Port the agent listens on.",
+        "key": "PORT",
+        "needed_by": [
+          "serving"
+        ],
+        "required": false
+      },
+      {
+        "default": "wait",
+        "description": "Advertised agent name.",
+        "key": "AGENT_NAME",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "description": "Advertised description.",
+        "key": "AGENT_DESCRIPTION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "1.0.0",
+        "description": "Advertised version.",
+        "key": "AGENT_VERSION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "",
+        "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost.",
+        "key": "CLOUD_RUN_URL",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": false
+      },
+      {
+        "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+        "key": "A2A_AUTH_TOKEN",
+        "needed_by": [
+          "inbound_auth"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+        "key": "TASK_STORE_DSN",
+        "needed_by": [
+          "task_persistence"
+        ],
+        "required": false,
+        "secret": true
+      }
+    ],
+    "join_nodes": [
+      "n_merge_5"
+    ],
+    "nodes": [
+      {
+        "canvas_id": "trigger",
+        "config": {
+          "input_mode": "json",
+          "payload_schema": {
+            "fields": [
+              {
+                "description": "Order to settle",
+                "name": "order_id",
+                "required": true,
+                "type": "string"
+              }
+            ]
+          },
+          "state_key": "wf"
+        },
+        "is_entry": true,
+        "module": "nodes.a2a_start",
+        "name": "a2a_start",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Start",
+        "type": "A2A_START"
+      },
+      {
+        "canvas_id": "end",
+        "config": {
+          "output_mapping": {}
+        },
+        "is_terminal": true,
+        "module": "nodes.n_end_3",
+        "name": "n_end_3",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "End",
+        "type": "END"
+      },
+      {
+        "canvas_id": "join",
+        "is_join": true,
+        "module": "nodes.n_merge_5",
+        "name": "n_merge_5",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Join",
+        "type": "MERGE"
+      },
+      {
+        "canvas_id": "fork",
+        "config": {
+          "branches": [
+            "poll",
+            "notify"
+          ]
+        },
+        "module": "nodes.n_parallel_fork_4",
+        "name": "n_parallel_fork_4",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Split",
+        "type": "PARALLEL_FORK"
+      },
+      {
+        "canvas_id": "checked",
+        "config": {
+          "expression": "result = {'status': 'settled'}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_1",
+        "name": "n_transform_1",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Check Status",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "sent",
+        "config": {
+          "expression": "result = {'receipt': 'sent'}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_6",
+        "name": "n_transform_6",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Send Receipt",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "cooloff",
+        "config": {
+          "duration": 1,
+          "unit": "seconds"
+        },
+        "module": "nodes.n_wait_2",
+        "name": "n_wait_2",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Rate limit",
+        "type": "WAIT"
+      },
+      {
+        "canvas_id": "settle",
+        "config": {
+          "duration": 3,
+          "unit": "seconds"
+        },
+        "module": "nodes.n_wait_7",
+        "name": "n_wait_7",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Let it settle",
+        "type": "WAIT"
+      }
+    ],
+    "schema_version": 1,
+    "terminal_node": "n_end_3",
+    "workflow": {
+      "canvas_version": 2,
+      "description": "Seed workflow: wait",
+      "name": "wait",
+      "slug": "wait",
+      "version_id": "golden-version-id"
+    }
+  },
+  "warnings": []
+}

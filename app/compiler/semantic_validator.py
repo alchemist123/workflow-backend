@@ -20,7 +20,9 @@ is not obvious from the canvas:
 
 import networkx as nx
 
+from app.compiler.inputs import available_inputs, input_is_opaque
 from app.nodes.agent_io import structure_errors
+from app.nodes.variables import name_error as variable_name_error
 from app.nodes.registry import (
     RETIRED_TRIGGER_TYPES,
     AGENT_TYPES,
@@ -348,11 +350,127 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
         pass
 
     # ── Per-node config rules ────────────────────────────────────────────────
+    # variable name -> the node that saves it, for collision reporting.
+    variable_owners: dict[str, str] = {}
+
     for node in canvas.nodes:
         if node.type == "CONDITION" and not node.config.get("branches"):
             errors.append(
                 f"Node '{node.id}' (CONDITION) must define at least one branch"
             )
+
+        # A field mapping is checked against what is actually available here:
+        # the whole point of declaring the shape is that a source which will
+        # never resolve can be caught now rather than at 3am.
+        if node.type == "TRANSFORM" and (node.config.get("mode") or "fields") == "fields":
+            declared = node.config.get("output_fields") or []
+            if not declared:
+                errors.append(
+                    f"Node '{node.id}' (TRANSFORM) builds no fields. Add at "
+                    "least one output field, or switch to an expression mode."
+                )
+
+            known = {f.path: f for f in available_inputs(canvas, node.id)}
+            opaque = input_is_opaque(canvas, node.id)
+            seen_names: set[str] = set()
+
+            for index, field in enumerate(declared):
+                name = (field.get("name") or "").strip()
+                label = name or f"field {index + 1}"
+                if not name:
+                    errors.append(
+                        f"Node '{node.id}' (TRANSFORM) has an output field with "
+                        "no name."
+                    )
+                elif name in seen_names:
+                    errors.append(
+                        f"Node '{node.id}' (TRANSFORM) builds '{name}' twice."
+                    )
+                seen_names.add(name)
+
+                source = (field.get("source") or "").strip()
+                if not source:
+                    if "default" in field and field["default"] is not None:
+                        continue  # a constant, not a mapping
+                    errors.append(
+                        f"Node '{node.id}' (TRANSFORM): '{label}' has no source. "
+                        "Pick where its value comes from, or give it a default."
+                    )
+                    continue
+
+                match = known.get(source) or known.get(f"data.{source}")
+                if match is None:
+                    # `vars.x.y.z` is fine when `vars.x` is known but its shape
+                    # is not -- the lookup just goes deeper at runtime.
+                    prefix_known = any(
+                        source.startswith(f"{path}.") for path in known
+                    )
+                    if prefix_known or opaque:
+                        warnings.append(
+                            f"Node '{node.id}' (TRANSFORM): '{label}' reads "
+                            f"'{source}', which the canvas cannot confirm is "
+                            "present. It will be skipped at runtime if absent."
+                        )
+                    else:
+                        available = ", ".join(sorted(known)[:6]) or "nothing declared upstream"
+                        errors.append(
+                            f"Node '{node.id}' (TRANSFORM): '{label}' reads "
+                            f"'{source}', which nothing upstream produces. "
+                            f"Available here: {available}."
+                        )
+                    continue
+
+                wanted = field.get("type") or "string"
+                if wanted != match.type and match.type != "any" and wanted != "any":
+                    # Compatible enough to convert, so this is a note not a block.
+                    warnings.append(
+                        f"Node '{node.id}' (TRANSFORM): '{label}' is declared "
+                        f"{wanted} but '{source}' is {match.type}. It will be "
+                        "converted, or passed through unchanged if it cannot be."
+                    )
+
+        # A variable name that cannot be bound would simply never appear, so
+        # it is caught here rather than discovered in an expression.
+        variable = (node.config.get("output_variable") or "").strip()
+        if variable:
+            problem = variable_name_error(variable)
+            if problem:
+                errors.append(f"Node '{node.id}' ({node.type}): {problem}")
+            elif variable in variable_owners:
+                warnings.append(
+                    f"Node '{node.id}' ({node.type}) saves to '{variable}', "
+                    f"which node '{variable_owners[variable]}' also saves to. "
+                    "Whichever runs last wins."
+                )
+            else:
+                variable_owners[variable] = node.id
+
+        if node.type == "WAIT":
+            from app.nodes.tasks.wait import (
+                BLOCKING_COMFORT_SECONDS,
+                MAX_WAIT_SECONDS,
+                wait_seconds,
+            )
+
+            seconds = wait_seconds(node.config)
+            if seconds <= 0:
+                errors.append(
+                    f"Node '{node.id}' (WAIT) has no duration, so it would not "
+                    "wait at all. Set how long to wait, or remove the node."
+                )
+            elif seconds > MAX_WAIT_SECONDS:
+                errors.append(
+                    f"Node '{node.id}' (WAIT) would wait {seconds / 60:.0f} "
+                    f"minutes, over the {MAX_WAIT_SECONDS // 60}-minute limit. "
+                    "A wait that long belongs outside the workflow — have a "
+                    "scheduler start it later instead of holding a run open."
+                )
+            elif seconds > BLOCKING_COMFORT_SECONDS:
+                warnings.append(
+                    f"Node '{node.id}' (WAIT) waits {seconds:.0f}s. A blocking "
+                    "caller holds its connection open for the whole time, so "
+                    "invoke this workflow in task mode and poll for the result."
+                )
 
         # An input request with no fields parks the run to ask for nothing,
         # which can only ever be a mistake.

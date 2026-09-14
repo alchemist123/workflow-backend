@@ -175,6 +175,21 @@ class GraphPlan:
         return [n.name for n in self.nodes if n.is_join]
 
     @property
+    def join_sources(self) -> dict[str, list[str]]:
+        """Join node name -> the nodes feeding it, in edge order.
+
+        ADK hands a JoinNode a dict keyed by predecessor name, and dict order
+        is arrival order — a race between the branches. A MERGE that picks one
+        result, or lists them, has to be reproducible, so it orders them by
+        this list instead.
+        """
+        sources: dict[str, list[str]] = {n.name: [] for n in self.nodes if n.is_join}
+        for edge in self.edges:
+            if edge.to_node in sources and edge.from_node not in sources[edge.to_node]:
+                sources[edge.to_node].append(edge.from_node)
+        return sources
+
+    @property
     def unsupported(self) -> list[PlannedNode]:
         return [n for n in self.nodes if not n.supported]
 

@@ -1,0 +1,289 @@
+{
+  "plan": {
+    "edges": [
+      {
+        "from": "START",
+        "route": null,
+        "to": "a2a_start"
+      },
+      {
+        "from": "a2a_start",
+        "route": null,
+        "to": "n_parallel_fork_4"
+      },
+      {
+        "from": "n_merge_5",
+        "route": null,
+        "to": "n_transform_8"
+      },
+      {
+        "from": "n_parallel_fork_4",
+        "route": null,
+        "to": "n_transform_7"
+      },
+      {
+        "from": "n_parallel_fork_4",
+        "route": null,
+        "to": "n_transform_6"
+      },
+      {
+        "from": "n_parallel_fork_4",
+        "route": null,
+        "to": "n_transform_2"
+      },
+      {
+        "from": "n_parallel_fork_4",
+        "route": null,
+        "to": "n_transform_1"
+      },
+      {
+        "from": "n_transform_1",
+        "route": null,
+        "to": "n_merge_5"
+      },
+      {
+        "from": "n_transform_2",
+        "route": null,
+        "to": "n_merge_5"
+      },
+      {
+        "from": "n_transform_6",
+        "route": null,
+        "to": "n_merge_5"
+      },
+      {
+        "from": "n_transform_7",
+        "route": null,
+        "to": "n_merge_5"
+      },
+      {
+        "from": "n_transform_8",
+        "route": null,
+        "to": "n_end_3"
+      }
+    ],
+    "entry_node": "a2a_start",
+    "env_keys": [
+      {
+        "default": "8080",
+        "description": "Port the agent listens on.",
+        "key": "PORT",
+        "needed_by": [
+          "serving"
+        ],
+        "required": false
+      },
+      {
+        "default": "parallel_fan",
+        "description": "Advertised agent name.",
+        "key": "AGENT_NAME",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "description": "Advertised description.",
+        "key": "AGENT_DESCRIPTION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "1.0.0",
+        "description": "Advertised version.",
+        "key": "AGENT_VERSION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "",
+        "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost.",
+        "key": "CLOUD_RUN_URL",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": false
+      },
+      {
+        "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+        "key": "A2A_AUTH_TOKEN",
+        "needed_by": [
+          "inbound_auth"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+        "key": "TASK_STORE_DSN",
+        "needed_by": [
+          "task_persistence"
+        ],
+        "required": false,
+        "secret": true
+      }
+    ],
+    "join_nodes": [
+      "n_merge_5"
+    ],
+    "nodes": [
+      {
+        "canvas_id": "trigger",
+        "config": {
+          "input_mode": "json",
+          "output_variable": "order",
+          "payload_schema": {
+            "fields": [
+              {
+                "description": "Order total",
+                "name": "amount",
+                "required": true,
+                "type": "number"
+              }
+            ]
+          },
+          "state_key": "wf"
+        },
+        "is_entry": true,
+        "module": "nodes.a2a_start",
+        "name": "a2a_start",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Order",
+        "type": "A2A_START"
+      },
+      {
+        "canvas_id": "done",
+        "config": {
+          "output_mapping": {}
+        },
+        "is_terminal": true,
+        "module": "nodes.n_end_3",
+        "name": "n_end_3",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Done",
+        "type": "END"
+      },
+      {
+        "canvas_id": "join",
+        "config": {
+          "merge_mode": "merge"
+        },
+        "is_join": true,
+        "module": "nodes.n_merge_5",
+        "name": "n_merge_5",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Join",
+        "type": "MERGE"
+      },
+      {
+        "canvas_id": "fork",
+        "config": {
+          "branches": [
+            "tax",
+            "shipping",
+            "discount",
+            "audit"
+          ]
+        },
+        "module": "nodes.n_parallel_fork_4",
+        "name": "n_parallel_fork_4",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Fan Out",
+        "type": "PARALLEL_FORK"
+      },
+      {
+        "canvas_id": "audit",
+        "config": {
+          "expression": "result = {'audited': True}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_1",
+        "name": "n_transform_1",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Audit",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "discount",
+        "config": {
+          "expression": "result = {'discount': 10 if (data.get('amount') or 0) >= 150 else 0}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_2",
+        "name": "n_transform_2",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Discount",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "shipping",
+        "config": {
+          "expression": "result = {'shipping': 5 if (data.get('amount') or 0) < 100 else 0}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_6",
+        "name": "n_transform_6",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Shipping",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "tax",
+        "config": {
+          "expression": "result = {'tax': round((data.get('amount') or 0) * 0.2, 2)}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_7",
+        "name": "n_transform_7",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Tax",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "total",
+        "config": {
+          "expression": "result = {'total': round((vars['order']['amount'] or 0) + (data.get('tax') or 0) + (data.get('shipping') or 0) - (data.get('discount') or 0), 2)}",
+          "mode": "python",
+          "output_variable": "totals"
+        },
+        "module": "nodes.n_transform_8",
+        "name": "n_transform_8",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Grand Total",
+        "type": "TRANSFORM"
+      }
+    ],
+    "schema_version": 1,
+    "terminal_node": "n_end_3",
+    "workflow": {
+      "canvas_version": 2,
+      "description": "Seed workflow: parallel_fan",
+      "name": "parallel_fan",
+      "slug": "parallel_fan",
+      "version_id": "golden-version-id"
+    }
+  },
+  "warnings": []
+}

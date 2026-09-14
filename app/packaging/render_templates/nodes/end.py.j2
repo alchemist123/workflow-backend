@@ -1,12 +1,13 @@
 {% include "nodes/_header.j2" %}
 from google.adk.agents.context import Context
-from google.adk.workflow import node
 
 from core.logging import node_logger
 from core.state import read_state
-from nodes.base import NODE_KWARGS, terminal_event
+from nodes.base import NODE_KWARGS, flow_node, terminal_event
 
 NODE_ID = {{ node.name | tojson }}
+# Name this node saves its result under, for later nodes to read.
+OUTPUT_VARIABLE = {{ output_variable | tojson }}
 
 # {source_key: output_key}. Empty means the whole accumulated state is returned.
 OUTPUT_MAPPING: dict[str, str] = {{ output_mapping | pyliteral }}
@@ -14,7 +15,7 @@ OUTPUT_MAPPING: dict[str, str] = {{ output_mapping | pyliteral }}
 log = node_logger(NODE_ID)
 
 
-@node(name=NODE_ID, **NODE_KWARGS({{ node_kwargs }}))
+@flow_node(name=NODE_ID, variable=OUTPUT_VARIABLE, **NODE_KWARGS({{ node_kwargs }}))
 async def {{ node.name }}(ctx: Context, node_input=None):
     # Accumulated state first, then this path's own output, so a value set by
     # the immediately preceding node wins.

@@ -270,10 +270,13 @@ def test_merge_becomes_a_join_node_in_the_registry(tmp_path):
     render_package(plan, tmp_path / "pkg")
 
     merge = next(n for n in plan.nodes if n.is_join)
-    # A JoinNode has no body, so no module is written for it.
+    # A join has no body of its own, so no per-node module is written for it.
     assert not (tmp_path / "pkg" / f"nodes/{merge.name}.py").exists()
     registry = (tmp_path / "pkg" / "nodes/registry.py").read_text()
-    assert f'JoinNode(name="{merge.name}")' in registry
+    # It is a JoinNode subclass that also flattens what the branches produced;
+    # see nodes/merge.py.
+    assert f'MergeNode(\n        name="{merge.name}"' in registry, registry
+    assert "from nodes.merge import MergeNode" in registry
 
 
 def test_payload_schema_reaches_the_entry_module(tmp_path):
@@ -427,7 +430,8 @@ def test_python_mode_transform_body_is_emitted_as_real_code(tmp_path):
     source = (tmp_path / "pkg" / f"nodes/{mid.name}.py").read_text()
 
     # Module-level Python, not a string handed to exec().
-    assert "def _transform(data: dict) -> dict:" in source
+    # `vars` carries the named variables alongside the edge payload.
+    assert "def _transform(data: dict, vars: dict)" in source
     assert "result = {'doubled': data.get('n', 0) * 2}" in source
     assert "exec(" not in source
 

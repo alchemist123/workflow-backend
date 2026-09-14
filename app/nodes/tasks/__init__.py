@@ -11,6 +11,7 @@ from .end import EndNode
 from .datasource import DataSourceNode
 from .human_approval import HumanApprovalNode
 from .human_input import HumanInputNode
+from .wait import WaitNode
 from .subworkflow import SubworkflowNode
 from .parallel_fork import ParallelForkNode
 from .merge import MergeNode
@@ -20,7 +21,7 @@ from .parallel_agent import ParallelAgentNode
 __all__ = [
     "AgentNode", "OrchestratorAgentNode", "RemoteAgentNode", "FunctionNode",
     "LlmAgentNode", "ToolNode", "ConditionNode", "LoopNode",
-    "TransformNode", "EndNode", "DataSourceNode", "HumanApprovalNode", "HumanInputNode",
+    "TransformNode", "EndNode", "DataSourceNode", "HumanApprovalNode", "HumanInputNode", "WaitNode",
     "SubworkflowNode", "ParallelForkNode", "MergeNode",
     "SequentialAgentNode", "ParallelAgentNode",
 ]

@@ -20,22 +20,28 @@ class MergeNode(NodeDefinition):
             category="flow",
             color="#0d9488",
             icon="Merge",
-            description="Wait for and combine outputs from parallel branches",
+            description="Wait for every parallel branch, then combine their outputs",
             wave=2,
         )
         self.config_schema = {
             "type": "object",
             "properties": {
-                "strategy": {
-                    "type": "string",
-                    "enum": ["wait_all", "wait_first"],
-                    "default": "wait_all",
-                    "description": "wait_all waits for every upstream branch; wait_first continues on the first",
-                },
+                # No `strategy`: a MERGE compiles to an ADK JoinNode, whose
+                # `_requires_all_predecessors` is True and not configurable.
+                # It always waits for every branch, so a "continue on the
+                # first" setting could only ever have been a control that did
+                # nothing. Canvases carrying one are migrated in v6 -> v7.
                 "merge_mode": {
                     "type": "string",
                     "enum": ["merge", "array", "first"],
                     "default": "merge",
+                    "description": (
+                        "How the branch outputs become one payload. "
+                        "merge: one object with every branch's keys, later "
+                        "branches winning a clash. array: {'results': [...]} "
+                        "in branch order. first: only the first branch's "
+                        "output."
+                    ),
                 },
             },
         }

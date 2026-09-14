@@ -6,6 +6,7 @@ from app.database import get_db
 from app.models.workflow import Workflow, WorkflowVersion, WorkflowExecution, ExecutionStatus, WorkflowStatus
 from app.schemas.workflow import (
     AnswerRequest,
+    NodeInputsRequest,
     WorkflowCreate, WorkflowUpdate, WorkflowRead, WorkflowVersionRead,
     SaveCanvasRequest, CompileResponse, ExecutionRead, TestRunRequest,
 )
@@ -363,6 +364,32 @@ async def answer_execution(
         body.response,
     )
     return execution
+
+
+@router.post("/node-inputs")
+async def node_inputs(body: NodeInputsRequest):
+    """Everything a node can read, for the field-mapping picker.
+
+    Worked out from the canvas: the entry node's payload contract, any output
+    structure an agent or a declarative transform promises, what a human node
+    collects, and the variables its ancestors saved. A node whose output shape
+    cannot be known contributes nothing, and `opaque` says so, so the UI can
+    let someone type a path the compiler would only be able to warn about.
+    """
+    from app.compiler.inputs import available_inputs, input_is_opaque
+    from app.schemas.canvas import CanvasPayload
+
+    try:
+        canvas = CanvasPayload.model_validate(body.canvas)
+    except Exception as exc:  # noqa: BLE001 - a half-drawn canvas is normal here
+        raise HTTPException(
+            status_code=422, detail=f"Canvas could not be read: {exc}"
+        ) from exc
+
+    return {
+        "inputs": [f.to_dict() for f in available_inputs(canvas, body.node_id)],
+        "opaque": input_is_opaque(canvas, body.node_id),
+    }
 
 
 @router.get("/{workflow_id}/executions", response_model=list[ExecutionRead])

@@ -448,8 +448,8 @@ async def test_parallel_fork_runs_both_branches_and_merges_them(packages_dir):
                     "FUNCTION",
                     {
                         "name": "collect",
-                        # A JoinNode hands its successor a dict keyed by
-                        # predecessor node name, so this proves both arrived.
+                        # A MERGE combines the branches into one payload, so
+                        # both branches' keys land here side by side.
                         "code": "result = {'joined': sorted(data.keys())}",
                     },
                 ),
@@ -476,11 +476,10 @@ async def test_parallel_fork_runs_both_branches_and_merges_them(packages_dir):
     # Both branches ran...
     visited = {step.canvas_id for step in run.steps}
     assert {"left", "right", "merge", "collect"} <= visited
-    # ...and the join delivered both, keyed by generated node name.
-    joined = run.result["joined"]
-    left = next(n.name for n in plan.nodes if n.canvas_id == "left")
-    right = next(n.name for n in plan.nodes if n.canvas_id == "right")
-    assert sorted(joined) == sorted([left, right]), joined
+    # ...and both branches' output reached the node after the merge, flat.
+    # Before MergeNode this was ADK's raw join shape — one key per predecessor
+    # node name — so `data['left_ran']` was simply absent.
+    assert run.result["joined"] == ["left_ran", "right_ran"], run.result
 
 
 @pytest.mark.asyncio

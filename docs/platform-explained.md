@@ -281,15 +281,117 @@ disagree.
 |------|-------------|
 | `CONDITION` | `if/else` branching — evaluates a Python expression against the current state |
 | `LOOP` | Walks a list, or repeats until an exit condition becomes true. The list is read once on entry, so the body cannot change what is being walked. |
-| `TRANSFORM` | Reshapes data between nodes. Three modes: JMESPath, Jinja2, Python |
-| `PARALLEL_FORK` | Splits execution into parallel branches |
-| `MERGE` | Rejoins parallel branches |
+| `TRANSFORM` | Reshapes data between nodes. Four modes: Fields, JMESPath, Jinja2, Python |
+| `PARALLEL_FORK` | Splits execution into parallel branches. One right-hand handle per branch, plus a spare so you can always drag out another. |
+| `MERGE` | Waits for every branch, then combines their outputs into one payload |
+
+**Fork and merge:**
+
+A `PARALLEL_FORK` fans one payload out to several nodes that run at the same
+time. Its outgoing handles come from `branches` in its config, one per name,
+and the node shows a spare handle underneath them — wiring the spare names a
+new branch and grows the list, so you never open the config panel just to add
+one. The names are labels, not routing values: ADK fans out along every plain
+outgoing edge by itself, so the generated fork module returns a plain event and
+never `Event(route=...)`. For the same reason a fork has no "save result as"
+box — it hands each branch the payload it was given, unchanged, so there is
+nothing of its own to name.
+
+Every branch must reach the same `MERGE`. A fork whose branches each end
+somewhere different produces several terminal outputs and ADK rejects the run,
+so the compiler refuses it up front.
+
+A `MERGE` compiles to a subclass of ADK's `JoinNode` (`nodes/merge.py` in the
+package). The join part is ADK's: `_requires_all_predecessors` is True on the
+class and is not configurable, which is why a merge has no "strategy" setting —
+it always waits for every branch. What the subclass adds is the combining step,
+because a bare `JoinNode` passes the aggregated inputs straight through and
+those are keyed by predecessor node name — the node after the merge saw
+`data["n_transform_7"]["tax"]` rather than `data["tax"]`. `merge_mode` decides
+the shape:
+
+| Mode | The next node receives |
+|------|------------------------|
+| `merge` (default) | one object with every branch's keys; a later branch wins a clash |
+| `array` | `{"results": [...]}`, in the order the branches leave the fork |
+| `first` | only the first branch's output — the others still run |
+
+Branch order comes from the canvas, not from which branch happened to finish
+first: ADK keys the aggregated dict by arrival, so ordering by the edges is
+what makes `array` and `first` give the same answer every run.
+
+`test-agents/workflows/seed_parallel_fan.py` is a four-branch example;
+`backend/tests/test_parallel_fork.py` covers it.
 
 **TRANSFORM modes explained:**
 
+- **Fields** (the default) — no expression at all. You declare the shape you want out, field by field, and pick each field's source from a dropdown. See below.
 - **JMESPath** — a query language for JSON. Like `{name: user.name, total: length(items)}` extracts specific fields from a nested object.
 - **Jinja2** — a template language. `"Hello {{ name }}, you have {{ count }} items."` fills in values from the state dict.
 - **Python** — runs arbitrary safe Python. Assign `result = ...` and that becomes the output.
+
+#### Fields mode, and why the sources are a dropdown
+
+The other three modes are text boxes. Whatever you type is only checked when
+the workflow actually runs — a typo in a path is a 3am bug, not a red
+underline. Fields mode makes the mapping *data* instead:
+
+```jsonc
+{
+  "mode": "fields",
+  "output_fields": [
+    {"name": "product_code", "type": "string",  "source": "data.sku", "required": true},
+    {"name": "quantity_label", "type": "string", "source": "data.qty"},
+    {"name": "ordered_sku", "type": "string",  "source": "vars.order.sku"},
+    {"name": "carrier",     "type": "string",  "default": "standard-post"}
+  ]
+}
+```
+
+Two path prefixes: `data.` is the payload arriving on the edge, `vars.` is a
+variable some earlier node named (see *Variables*). A bare name means `data.`.
+
+The dropdown is fed by `POST /api/v1/workflows/node-inputs`, which takes the
+canvas being edited (not a saved id — the picker runs mid-edit) and a node id,
+and answers with everything that node can read. `app/compiler/inputs.py` works
+that out from the canvas, because several node types declare their output
+shape: `A2A_START` has a payload contract, a `fields` transform has these very
+fields, an agent can declare an output structure, a human node declares what it
+collects, and `LOOP` / `WAIT` / `CONDITION` add fixed keys. Anything else — a
+JMESPath expression, an agent's free text, an MCP tool's reply — is opaque, and
+the endpoint says so in `opaque` rather than guessing.
+
+Two deliberate limits on what it offers:
+
+- **only ancestors count.** A variable saved on a branch that did not run is
+  not available, and offering it would be offering something that is sometimes
+  absent.
+- **an opaque node adds nothing, but erases nothing.** What was declared before
+  it still passes through and is still offered. The result is "what is
+  guaranteed", which is the only honest basis for a compile-time error.
+
+The same function backs the semantic validator, so the picker and the check
+always agree. A source nothing upstream produces is an **error** listing the
+paths that do exist — unless something opaque is upstream, in which case it is
+a warning, because it might well resolve at runtime and a false error would
+block a valid workflow. A declared type that does not match the source is
+always a warning: `4` becomes `"4"` fine, and a type is a statement of intent,
+not a reason to kill a run.
+
+At runtime the generated node walks `OUTPUT_FIELDS` as a list of dicts — there
+is no emitted expression, so a field name cannot inject Python. Three
+behaviours worth knowing:
+
+- a **required** field whose source is missing fails the run, naming the field
+  and the path;
+- an **optional** field whose source is missing is left out of the result
+  entirely, rather than set to `null` — `"gift_message" in data` is how a later
+  node asks, and a `null` would answer it wrongly;
+- "missing" means *absent*, not *falsy*. A `0` or an empty string is a value
+  and does not trigger the default.
+
+`test-agents/workflows/seed_field_mapping.py` is a working example of all of
+this; `backend/tests/test_field_mapping.py` covers it.
 
 ---
 

@@ -516,6 +516,82 @@ A workflow can pause more than once. `seed_human_approval.py` does: an approval
 gate, then an input request on the approved path — approve, reject and supply
 values, all in one run.
 
+### Waiting
+
+ADK has no delay node. Searching the package for sleep / delay / schedule /
+timer turns up only retry backoff, polling loops and fixed internal delays;
+`workflow/_trigger.py` sounds relevant but `Trigger` is the data model for a
+downstream node's input, with no timing in it. So `WAIT` is `asyncio.sleep` in
+a generated node.
+
+**Why not park the task** the way HUMAN_APPROVAL does, which would survive a
+restart? Because nothing in the package would ever resume it. A wait that needs
+an external scheduler to fire is a scheduling integration, not a node — every
+`WAIT` would become a workflow that stops forever until something pokes it.
+
+**Why `asyncio.sleep` is acceptable:** it is cooperative, so a branch that is
+waiting does not hold up the branch beside it. Measured from the trace of
+`seed_wait.py` — a 1s and a 3s wait on parallel branches complete 2.01s apart
+and the graph finishes 3.06s in, not 4s.
+
+**The detail that makes it work.** `@node(timeout=N)` *kills* a node that
+outlives its timeout:
+
+    NodeTimeoutError: Node 'slow' timed out after 1.0 seconds.
+
+Nodes normally inherit `policies.timeout_seconds` — 120s in the seeds — so a
+five-minute wait would die at two minutes blaming a timeout rather than the
+wait. The renderer derives this node's timeout from its wait instead. Verified
+both ways: with the canvas policy an 8s wait died at 5s; with the derived
+timeout it completes.
+
+**What it costs, said out loud rather than hidden:**
+
+| | |
+| --- | --- |
+| The wait is in-process | a restart loses the run |
+| Blocking callers | hold a connection open for the whole wait — past 60s the validator says to use task mode |
+| Over an hour | rejected: that is a scheduling problem, not a pause in a run |
+
+The payload carries the **configured** wait, not the measured one. A measured
+duration differs by a millisecond between runs, and the generated suite asserts
+a blocking call and a polled call return the same result — so a timing value in
+the payload failed `test_both_modes_agree_on_the_result` for every workflow with
+a WAIT. The real elapsed time goes to the log, where a difference is
+information rather than noise.
+
+### Variables
+
+Each node can name its result. Later nodes read it as `vars['<name>']` in a
+Transform expression or a Condition branch — including across edges that no
+longer carry it, which is the point.
+
+**ADK has no separate variable concept: variables *are* session-state keys**,
+bound by name. Verified against 2.8.0 — a node returning
+`Event(state={"customer": "ACME"})` makes a later node's `customer` parameter
+arrive as `"ACME"`, and the session holds a flat `{'customer': 'ACME'}`.
+`node_input` is special-cased as the edge payload rather than a state key. So a
+canvas variable is a **flat, top-level state key**, the same place
+`LlmAgent.output_key` already writes, and readable by ADK's own binding.
+
+**The saving is wired once, in the decorator.** The node modules have 27 return
+sites between them — a router has three, a remote agent four — and a variable
+saved on some paths but not others is worse than no variable at all. So
+`flow_node` wraps ADK's `@node`, and records the result after the node returns
+whichever way it got there.
+
+**The namespace is shared, so names are checked.** The workflow's own payload
+lives under `wf`, a loop keeps counters under `_loop_<node>_*`, and ADK reserves
+anything containing `:` (`app:`, `user:`, `temp:`). A name that collides, or one
+that is not identifier-shaped — ADK binds parameters by name, and a parameter
+cannot be called `my var` — is a compile error rather than a variable that
+quietly never appears. Two nodes writing the same name is a warning: whichever
+runs last wins.
+
+Only nodes that produce a result of their own offer it. A Sequential or Parallel
+Tools group is resolved into its consumer's tool list, and a MERGE is a
+`JoinNode` with no module, so neither has a result to name.
+
 ### Tool declarations need real signatures
 
 ADK builds a tool's declaration from its Python signature, so a wrapper written

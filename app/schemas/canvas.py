@@ -7,7 +7,7 @@ from typing import Any
 #   2  A2A_START replaces all triggers; single entry, single terminal
 #   3  ORCHESTRATOR_AGENT loses tool_execution_mode; ordering is drawn with
 #      SEQUENTIAL_AGENT / PARALLEL_AGENT nodes instead
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 
 class NodePosition(BaseModel):

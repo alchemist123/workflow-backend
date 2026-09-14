@@ -69,6 +69,17 @@ class ExecutionRead(BaseModel):
         from_attributes = True
 
 
+class NodeInputsRequest(BaseModel):
+    """Ask what a node can read, for the mapping picker.
+
+    Takes the canvas rather than a saved version id: the picker is used while
+    editing, before anything is saved.
+    """
+
+    canvas: dict[str, Any]
+    node_id: str
+
+
 class AnswerRequest(BaseModel):
     """The reply to a run parked on a HUMAN_APPROVAL node.
 

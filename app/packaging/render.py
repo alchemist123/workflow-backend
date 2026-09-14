@@ -42,9 +42,11 @@ STATIC_FILES: tuple[str, ...] = (
     "core/config.py",
     "core/a2a_app.py",
     "core/state.py",
+    "core/variables.py",
     "core/logging.py",
     "nodes/__init__.py",
     "nodes/base.py",
+    "nodes/merge.py",
     "tools/__init__.py",
     "tools/signature.py",
     "tools/schema.py",
@@ -73,6 +75,7 @@ NODE_TEMPLATES: dict[str, str] = {
     "FUNCTION": "nodes/function.py.j2",
     "END": "nodes/end.py.j2",
     "LOOP": "nodes/loop.py.j2",
+    "WAIT": "nodes/wait.py.j2",
     "PARALLEL_FORK": "nodes/parallel_fork.py.j2",
     "TOOL": "nodes/mcp_tool.py.j2",
     "DATASOURCE": "nodes/mcp_tool.py.j2",
@@ -132,6 +135,32 @@ def _environment() -> Environment:
 # ── Canvas code bodies ───────────────────────────────────────────────────────
 
 
+def _output_fields(config: dict, canvas_id: str) -> list[dict]:
+    """The declared output shape, cleaned for embedding."""
+    cleaned: list[dict] = []
+    for field in config.get("output_fields") or []:
+        name = (field.get("name") or "").strip()
+        if not name:
+            continue
+        entry: dict = {
+            "name": name,
+            "source": (field.get("source") or "").strip(),
+            "type": field.get("type") or "string",
+        }
+        if field.get("required"):
+            entry["required"] = True
+        if "default" in field and field["default"] is not None:
+            entry["default"] = field["default"]
+        cleaned.append(entry)
+
+    if not cleaned:
+        raise RenderError(
+            f"Canvas node '{canvas_id}' (TRANSFORM) builds no fields. Add at "
+            "least one output field, or switch to an expression mode."
+        )
+    return cleaned
+
+
 def _indent_body(code: str, canvas_id: str, *, spaces: int = 4) -> str:
     """Validate a canvas code body and indent it for embedding in a function.
 
@@ -171,11 +200,17 @@ def _validate_expression(expression: str, canvas_id: str, label: str) -> str:
 # ── Per-node template context ────────────────────────────────────────────────
 
 
-def _node_kwargs(node: PlannedNode) -> str:
-    """The literal keyword arguments for this node's `@node(...)` decorator."""
+def _node_kwargs(node: PlannedNode, timeout: int | None = None) -> str:
+    """The literal keyword arguments for this node's `@node(...)` decorator.
+
+    `timeout` overrides the canvas policy. WAIT needs that: ADK kills a node
+    that outlives its timeout, and the canvas default (120s in the seeds) is
+    shorter than many useful waits.
+    """
     parts = []
-    if node.timeout:
-        parts.append(f"timeout={int(node.timeout)}")
+    effective = timeout if timeout is not None else node.timeout
+    if effective:
+        parts.append(f"timeout={int(effective)}")
     if node.retries and node.retries > 1:
         parts.append(f"retries={int(node.retries)}")
     return ", ".join(parts)
@@ -252,7 +287,13 @@ def _node_context(node: PlannedNode, plan: GraphPlan) -> dict[str, Any]:
     """Everything a node template needs, keyed by template variable."""
     config = node.config or {}
     env = config.get("_env") or {}
-    base: dict[str, Any] = {"node": node, "node_kwargs": _node_kwargs(node)}
+    base: dict[str, Any] = {
+        "node": node,
+        "node_kwargs": _node_kwargs(node),
+        # Every node may name its result; `flow_node` saves it after the node
+        # returns, so all of a node's return paths are covered at once.
+        "output_variable": (config.get("output_variable") or "").strip(),
+    }
 
     if node.node_type == "A2A_START":
         from app.nodes.triggers import example_payload, payload_json_schema
@@ -264,7 +305,7 @@ def _node_context(node: PlannedNode, plan: GraphPlan) -> dict[str, Any]:
         }
 
     if node.node_type == "TRANSFORM":
-        mode = config.get("mode") or "jmespath"
+        mode = config.get("mode") or "fields"
         context = {
             **base,
             "mode": mode,
@@ -272,7 +313,9 @@ def _node_context(node: PlannedNode, plan: GraphPlan) -> dict[str, Any]:
             "expression": config.get("expression") or "",
             "python_body": "",
         }
-        if mode == "python":
+        if mode == "fields":
+            context["output_fields"] = _output_fields(config, node.canvas_id)
+        elif mode == "python":
             context["python_body"] = _indent_body(config.get("expression", ""), node.canvas_id)
         elif mode == "jmespath" and not context["expression"]:
             raise RenderError(
@@ -341,6 +384,18 @@ def _node_context(node: PlannedNode, plan: GraphPlan) -> dict[str, Any]:
             "default_prompt": "Please provide the following.",
             "response_schema": request_json_schema(config),
             "required_fields": required_fields(config),
+        }
+
+    if node.node_type == "WAIT":
+        from app.nodes.tasks.wait import node_timeout_for, wait_seconds
+
+        seconds = wait_seconds(config)
+        return {
+            **base,
+            "wait_seconds": seconds,
+            # Not the canvas policy: a node whose job is to take a long time
+            # must not be killed for taking it.
+            "node_kwargs": _node_kwargs(node, timeout=node_timeout_for(config)),
         }
 
     if node.node_type == "LOOP":
@@ -825,6 +880,9 @@ Generated for {plan.workflow_name}. Runs offline: no model, no network.
 from __future__ import annotations
 
 EXPECTED_NODES = {sorted(n.name for n in plan.nodes)!r}
+# Nodes with a module of their own. A MERGE is a JoinNode built in the registry,
+# so it has none.
+MODULE_NODES = {sorted(n.name for n in plan.nodes if not n.is_join)!r}
 ENTRY_NODE = {plan.entry_node!r}
 TERMINAL_NODE = {plan.terminal_node!r}
 
@@ -847,12 +905,15 @@ def test_registry_matches_the_graph():
 
 
 def test_every_node_module_imports():
-    """One file per canvas node, all importable."""
+    """One file per canvas node, all importable.
+
+    Except a MERGE: the registry builds it as a JoinNode, so it has no module
+    of its own. Importing one raised ModuleNotFoundError for any workflow that
+    joined parallel branches.
+    """
     import importlib
 
-    from nodes.registry import NODES
-
-    for name in NODES:
+    for name in MODULE_NODES:
         module = importlib.import_module(f"nodes.{{name}}")
         assert module is not None
 

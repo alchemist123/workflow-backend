@@ -4,14 +4,38 @@ from app.nodes.tasks import (
     AgentNode, OrchestratorAgentNode, RemoteAgentNode, FunctionNode,
     LlmAgentNode, ToolNode, ConditionNode, LoopNode,
     TransformNode, EndNode, DataSourceNode, HumanApprovalNode,
-    SubworkflowNode, ParallelForkNode, MergeNode, HumanInputNode,
+    SubworkflowNode, ParallelForkNode, MergeNode, HumanInputNode, WaitNode,
     SequentialAgentNode, ParallelAgentNode,
 )
 
 NODE_REGISTRY: dict[str, NodeDefinition] = {}
 
 
+# Every flow node may name its result, so a later node can read it by name.
+# Injected here rather than repeated in twenty node classes -- and skipped for
+# the types that never produce a result of their own: a tool group is resolved
+# into its consumer's tool list, MERGE is a JoinNode with no module, and
+# PARALLEL_FORK hands each branch the payload it was given unchanged -- naming
+# that would save a copy of whatever the node before it already produced.
+_NO_VARIABLE = frozenset(
+    {"SEQUENTIAL_AGENT", "PARALLEL_AGENT", "MERGE", "PARALLEL_FORK"}
+)
+
+_VARIABLE_PROPERTY = {
+    "type": "string",
+    "description": (
+        "Save this node's result under this name. Later nodes read it as "
+        "`vars['<name>']`, and it is written to workflow state as a top-level "
+        "key -- the same place an agent's output_key goes."
+    ),
+}
+
+
 def _register(node: NodeDefinition) -> None:
+    if node.node_type not in _NO_VARIABLE:
+        node.config_schema.setdefault("properties", {})["output_variable"] = dict(
+            _VARIABLE_PROPERTY
+        )
     NODE_REGISTRY[node.node_type] = node
 
 
@@ -33,6 +57,7 @@ _register(ConditionNode())
 _register(LoopNode())
 _register(TransformNode())
 _register(EndNode())
+_register(WaitNode())
 
 # Tool groups — they collect tools and expose them to a consumer as one.
 _register(SequentialAgentNode())

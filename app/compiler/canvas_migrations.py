@@ -81,6 +81,10 @@ def migrate_canvas(canvas: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         working, migration_notes = _migrate_v5_to_v6(working)
         notes.extend(migration_notes)
 
+    if canvas_schema_version(working) < 7:
+        working, migration_notes = _migrate_v6_to_v7(working)
+        notes.extend(migration_notes)
+
     working["schema_version"] = CURRENT_SCHEMA_VERSION
     return working, notes
 
@@ -110,7 +114,7 @@ def _migrate_v1_to_v2(canvas: dict[str, Any]) -> tuple[dict[str, Any], list[str]
     notes.append(
         f"node '{kept.get('id')}': {old_type} -> A2A_START"
         + (
-            f" (payload fields carried over from body_schema)"
+            " (payload fields carried over from body_schema)"
             if (kept.get("config") or {}).get("body_schema")
             else ""
         )
@@ -334,6 +338,73 @@ def _migrate_v5_to_v6(canvas: dict[str, Any]) -> tuple[dict[str, Any], list[str]
             if value:
                 config[new_key] = value
                 notes.append(f"node '{node_id}': {old_key} -> {new_key}")
+
+        node["config"] = config
+        nodes.append(node)
+
+    return {**canvas, "nodes": nodes}, notes
+
+
+def _migrate_v6_to_v7(canvas: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Repair the ways a fork/merge pair drawn in the UI could not work.
+
+    PARALLEL_FORK's outgoing handles come from `branches`, and a node dropped
+    from the palette had none. It could not be wired (no handles to drag from)
+    and could not compile (the schema wants at least two). Where edges exist,
+    their handles say what the branches were; a fork with no edges at all gets
+    the default pair the palette now drops. A fork also loses `output_variable`
+    — it hands each branch the payload it was given, so it has no result of its
+    own to name.
+
+    MERGE loses `strategy`. It compiles to an ADK JoinNode, whose
+    `_requires_all_predecessors` is True and not configurable: it always waits
+    for every branch. "Continue on the first" was never implementable, and the
+    config panel compounded it by offering `all` / `first` / `any`, none of
+    which were even in the schema's enum — so every Merge configured from the
+    panel failed validation outright. `merge_mode`, which does now decide how
+    the branch outputs are combined, is kept as it stands.
+    """
+    notes: list[str] = []
+    nodes: list[dict] = []
+    edges = canvas.get("edges") or []
+
+    for node in canvas.get("nodes") or []:
+        node_type = node.get("type")
+        if node_type not in ("MERGE", "PARALLEL_FORK"):
+            nodes.append(node)
+            continue
+
+        node = dict(node)
+        config = dict(node.get("config") or {})
+        node_id = node.get("id")
+
+        if node_type == "MERGE":
+            if config.pop("strategy", None) is not None:
+                notes.append(
+                    f"node '{node_id}': strategy removed "
+                    "(a merge always waits for every branch)"
+                )
+        else:
+            branches = [b for b in (config.get("branches") or []) if b]
+            used = [
+                e.get("source_handle") or "output"
+                for e in edges
+                if e.get("source") == node_id
+            ]
+            merged = branches + [h for h in used if h not in branches]
+            if not merged:
+                merged = ["branch_1", "branch_2"]
+            if merged != branches:
+                config["branches"] = merged
+                notes.append(
+                    f"node '{node_id}': branches set to {merged} "
+                    "(a fork with none had no handles to wire)"
+                )
+
+        # A fork hands each branch the payload it was given, so it has no
+        # result of its own to name.
+        if node_type == "PARALLEL_FORK" and config.pop("output_variable", None):
+            notes.append(f"node '{node_id}': output_variable removed")
 
         node["config"] = config
         nodes.append(node)

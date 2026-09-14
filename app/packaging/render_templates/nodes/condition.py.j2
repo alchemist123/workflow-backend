@@ -1,12 +1,14 @@
 {% include "nodes/_header.j2" %}
 from google.adk.agents.context import Context
-from google.adk.workflow import node
 
 from core.logging import node_logger
+from core.variables import all_variables
 from core.state import merge_state
-from nodes.base import NODE_KWARGS, route_event
+from nodes.base import NODE_KWARGS, flow_node, route_event
 
 NODE_ID = {{ node.name | tojson }}
+# Name this node saves its result under, for later nodes to read.
+OUTPUT_VARIABLE = {{ output_variable | tojson }}
 
 # Branch names, in canvas order. Each is matched against the keys of the dict on
 # this node's outgoing edge in agent.py.
@@ -16,8 +18,12 @@ DEFAULT_ROUTE = {{ default_route | pyliteral }}
 log = node_logger(NODE_ID)
 
 
-def _evaluate(data: dict) -> str | None:
-    """The canvas branch expressions, in order. First match wins."""
+def _evaluate(data: dict, vars: dict) -> str | None:  # noqa: A002 - the canvas name
+    """The canvas branch expressions, in order. First match wins.
+
+    `data` is the payload from the previous node; `vars` is every named
+    variable, so a branch can route on something an earlier node saved.
+    """
 {% for branch in branches %}
     # {{ branch.name }}: {{ branch.expression }}
     try:
@@ -29,10 +35,10 @@ def _evaluate(data: dict) -> str | None:
     return None
 
 
-@node(name=NODE_ID, **NODE_KWARGS({{ node_kwargs }}))
+@flow_node(name=NODE_ID, variable=OUTPUT_VARIABLE, **NODE_KWARGS({{ node_kwargs }}))
 async def {{ node.name }}(ctx: Context, node_input=None):
     data = node_input or {}
-    branch = _evaluate(data) or DEFAULT_ROUTE
+    branch = _evaluate(data, all_variables(ctx)) or DEFAULT_ROUTE
     if branch is None:
         # No branch matched and no default edge exists, so the graph would
         # dead-end here. Fail loudly rather than hang the A2A task.

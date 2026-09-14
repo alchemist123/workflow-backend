@@ -30,6 +30,7 @@ STATIC_FILES = [
     "core/agent_card.py",
     "core/a2a_app.py",
     "core/state.py",
+    "core/variables.py",
     "core/logging.py",
     "nodes/__init__.py",
     "nodes/base.py",
@@ -137,10 +138,17 @@ def test_node_modules_carry_no_return_annotation(path):
             )
 
 
+# Files under nodes/ that are not a generated node module. merge.py holds the
+# JoinNode subclass a MERGE is built from — a class with `_run_impl`, not a
+# `@flow_node` function, because waiting for every predecessor comes from the
+# node class itself and cannot be reimplemented in a function.
+_NOT_NODE_MODULES = {"__init__.py", "base.py", "registry.py", "merge.py"}
+
+
 def test_node_modules_take_ctx_and_node_input():
     """ADK's default 'state' binding requires this exact signature shape."""
     for path in _python_files():
-        if path.parent.name != "nodes" or path.name in {"__init__.py", "base.py", "registry.py"}:
+        if path.parent.name != "nodes" or path.name in _NOT_NODE_MODULES:
             continue
         tree = ast.parse(path.read_text())
         found = False

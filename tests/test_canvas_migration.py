@@ -259,3 +259,112 @@ def test_migrated_canvas_compiles():
     assert ir is not None
     assert ir.entrypoints == ["t"]
     assert ir.nodes["t"].kind == "trigger.a2a_start"
+
+
+# ── v6 -> v7: the fork/merge pair the UI could not draw ──────────────────────
+
+
+def _fork_canvas(fork_config: dict, merge_config: dict, *, wired: bool) -> dict:
+    edges = [_edge("e0", "start", "fork"), _edge("e3", "join", "end")]
+    if wired:
+        edges += [
+            _edge("e1", "fork", "a", source_handle="left"),
+            _edge("e2", "fork", "b", source_handle="right"),
+            _edge("e4", "a", "join"),
+            _edge("e5", "b", "join"),
+        ]
+    return {
+        "schema_version": 6,
+        "nodes": [
+            _node("start", "A2A_START", {"input_mode": "json", "state_key": "wf"}),
+            _node("fork", "PARALLEL_FORK", fork_config),
+            _node("a", "TRANSFORM", {"mode": "jmespath", "expression": "@"}),
+            _node("b", "TRANSFORM", {"mode": "jmespath", "expression": "@"}),
+            _node("join", "MERGE", merge_config),
+            _node("end", "END"),
+        ],
+        "edges": edges,
+    }
+
+
+def _config(canvas: dict, node_id: str) -> dict:
+    return next(n for n in canvas["nodes"] if n["id"] == node_id)["config"]
+
+
+@pytest.mark.parametrize("strategy", ["all", "first", "any", "wait_all", "wait_first"])
+def test_a_merges_strategy_is_dropped(strategy):
+    """A MERGE compiles to an ADK JoinNode, which always waits for every branch.
+
+    `_requires_all_predecessors` is True on the class and not configurable, so
+    "continue on the first" was never implementable. The config panel made it
+    worse by offering `all` / `first` / `any`, none of which were in the
+    schema's enum — so every Merge configured from the UI failed validation.
+    """
+    migrated, notes = migrate_canvas(
+        _fork_canvas({"branches": ["left", "right"]}, {"strategy": strategy},
+                     wired=True)
+    )
+
+    assert "strategy" not in _config(migrated, "join")
+    assert any("strategy" in note for note in notes), notes
+
+
+def test_how_a_merge_combines_its_branches_is_kept():
+    """`merge_mode` is the one setting that does something."""
+    migrated, notes = migrate_canvas(
+        _fork_canvas({"branches": ["left", "right"]},
+                     {"strategy": "all", "merge_mode": "array"}, wired=True)
+    )
+    assert _config(migrated, "join")["merge_mode"] == "array"
+    assert not any("merge_mode" in note for note in notes), notes
+
+
+def test_a_forks_branches_are_recovered_from_the_edges_that_left_it():
+    """A fork dropped from the palette had no `branches`, so it had no handles.
+
+    Edges could still be drawn programmatically (or by a seed), and their
+    handles say what the branches were meant to be.
+    """
+    migrated, notes = migrate_canvas(
+        _fork_canvas({}, {"strategy": "wait_all"}, wired=True)
+    )
+
+    assert _config(migrated, "fork")["branches"] == ["left", "right"]
+    assert any("branches" in note for note in notes), notes
+
+
+def test_an_unwired_fork_gets_a_usable_default_pair():
+    """Two, because one branch is not a fork and the schema requires two."""
+    migrated, _notes = migrate_canvas(
+        _fork_canvas({}, {"strategy": "wait_all"}, wired=False)
+    )
+    assert _config(migrated, "fork")["branches"] == ["branch_1", "branch_2"]
+
+
+def test_a_forks_variable_is_dropped():
+    """It hands each branch the payload it was given; there is nothing to name."""
+    migrated, notes = migrate_canvas(
+        _fork_canvas({"branches": ["left", "right"], "output_variable": "fanned"},
+                     {"strategy": "wait_all"}, wired=True)
+    )
+
+    assert "output_variable" not in _config(migrated, "fork")
+    assert any("output_variable" in note for note in notes), notes
+
+
+def test_a_canvas_the_ui_used_to_produce_now_compiles():
+    """The whole point: a fork and merge drawn in the panel were dead on arrival.
+
+    An empty `branches` failed the schema (minItems 2) and `strategy: "all"`
+    failed the enum, so neither node could ever reach the compiler.
+    """
+    from app.compiler import run_compiler
+
+    broken = _fork_canvas({}, {"strategy": "all"}, wired=True)
+    migrated, _notes = migrate_canvas(broken)
+    errors, _warnings, ir = run_compiler(
+        CanvasPayload.model_validate(migrated), "v7"
+    )
+
+    assert errors == [], errors
+    assert sorted(ir.nodes["fork"].branches) == ["left", "right"]

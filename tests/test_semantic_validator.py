@@ -27,6 +27,14 @@ def _node(node_id: str, node_type: str, config: dict | None = None) -> dict:
     }
 
 
+_PASSTHROUGH = {"mode": "jmespath", "expression": "@"}
+"""A TRANSFORM that does nothing, for tests whose subject is the topology.
+
+`fields` is TRANSFORM's default mode, and a fields transform with no fields
+builds nothing — a real error, but not the one these tests are about.
+"""
+
+
 def _edge(source: str, target: str, source_handle: str = "output", target_handle: str = "input") -> dict:
     return {
         "id": f"e_{source}_{target}_{source_handle}",
@@ -208,8 +216,8 @@ def test_parallel_fork_that_reconverges_is_valid():
         [
             _node("start", "A2A_START", _START_FIELDS),
             _node("fork", "PARALLEL_FORK"),
-            _node("a", "TRANSFORM"),
-            _node("b", "TRANSFORM"),
+            _node("a", "TRANSFORM", _PASSTHROUGH),
+            _node("b", "TRANSFORM", _PASSTHROUGH),
             _node("merge", "MERGE"),
             _node("end", "END"),
         ],
@@ -232,8 +240,8 @@ def test_parallel_fork_whose_branches_never_rejoin_is_an_error():
         [
             _node("start", "A2A_START", _START_FIELDS),
             _node("fork", "PARALLEL_FORK"),
-            _node("a", "TRANSFORM"),
-            _node("b", "TRANSFORM"),
+            _node("a", "TRANSFORM", _PASSTHROUGH),
+            _node("b", "TRANSFORM", _PASSTHROUGH),
             _node("end", "END"),
         ],
         [
@@ -301,7 +309,7 @@ def test_orphaned_node_is_only_a_warning():
         [
             _node("start", "A2A_START", _START_FIELDS),
             _node("end", "END"),
-            _node("floating", "TRANSFORM"),
+            _node("floating", "TRANSFORM", _PASSTHROUGH),
         ],
         [_edge("start", "end")],
     )
@@ -348,8 +356,8 @@ def test_cycle_without_a_loop_node_is_an_error():
     canvas = _canvas(
         [
             _node("start", "A2A_START", _START_FIELDS),
-            _node("a", "TRANSFORM"),
-            _node("b", "TRANSFORM"),
+            _node("a", "TRANSFORM", _PASSTHROUGH),
+            _node("b", "TRANSFORM", _PASSTHROUGH),
             _node("end", "END"),
         ],
         [_edge("start", "a"), _edge("a", "b"), _edge("b", "a"), _edge("a", "end")],

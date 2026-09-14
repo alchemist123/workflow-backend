@@ -1,0 +1,19 @@
+# Lint config for a generated workflow package.
+#
+# The package is machine-written, so style rules are noise: what matters is
+# whether the generator emitted something broken. `F` (pyflakes) catches unused
+# imports, undefined names and shadowed definitions — the failures worth knowing
+# about. `E9` catches syntax and IO errors.
+#
+# Widen this if you start hand-editing the package.
+
+target-version = "py311"
+line-length = 100
+
+[lint]
+select = ["F", "E9"]
+
+[lint.per-file-ignores]
+# Node modules embed canvas code, which may legitimately shadow builtins or
+# leave a value unused.
+"nodes/*.py" = ["F841"]

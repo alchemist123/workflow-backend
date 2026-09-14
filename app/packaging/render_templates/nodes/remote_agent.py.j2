@@ -1,15 +1,16 @@
 {% include "nodes/_header.j2" %}
 from google.adk import Event
 from google.adk.agents.context import Context
-from google.adk.workflow import node
 
 from core.config import settings
 from core.logging import node_logger
 from core.state import as_text, merge_state
-from nodes.base import NODE_KWARGS, node_error
+from nodes.base import NODE_KWARGS, flow_node, node_error
 from tools import a2a as a2a_tools
 
 NODE_ID = {{ node.name | tojson }}
+# Name this node saves its result under, for later nodes to read.
+OUTPUT_VARIABLE = {{ output_variable | tojson }}
 ON_ERROR = {{ node.on_error | tojson }}
 
 AGENT_LABEL = {{ agent_label | tojson }}
@@ -30,7 +31,7 @@ OUTPUT_KEY = {{ output_key | tojson }}
 log = node_logger(NODE_ID)
 
 
-@node(name=NODE_ID, **NODE_KWARGS({{ node_kwargs }}))
+@flow_node(name=NODE_ID, variable=OUTPUT_VARIABLE, **NODE_KWARGS({{ node_kwargs }}))
 async def {{ node.name }}(ctx: Context, node_input=None):
     data = node_input or {}
     endpoint = settings.env_value(ENDPOINT_ENV_KEY)

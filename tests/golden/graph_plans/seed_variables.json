@@ -1,0 +1,253 @@
+{
+  "plan": {
+    "edges": [
+      {
+        "from": "START",
+        "route": null,
+        "to": "a2a_start"
+      },
+      {
+        "from": "a2a_start",
+        "route": null,
+        "to": "n_transform_4"
+      },
+      {
+        "from": "n_condition_6",
+        "route": "bulk",
+        "to": "n_transform_1"
+      },
+      {
+        "from": "n_condition_6",
+        "route": "standard",
+        "to": "n_transform_5"
+      },
+      {
+        "from": "n_transform_1",
+        "route": null,
+        "to": "n_end_2"
+      },
+      {
+        "from": "n_transform_3",
+        "route": null,
+        "to": "n_condition_6"
+      },
+      {
+        "from": "n_transform_4",
+        "route": null,
+        "to": "n_transform_3"
+      },
+      {
+        "from": "n_transform_5",
+        "route": null,
+        "to": "n_end_2"
+      }
+    ],
+    "entry_node": "a2a_start",
+    "env_keys": [
+      {
+        "default": "8080",
+        "description": "Port the agent listens on.",
+        "key": "PORT",
+        "needed_by": [
+          "serving"
+        ],
+        "required": false
+      },
+      {
+        "default": "variables",
+        "description": "Advertised agent name.",
+        "key": "AGENT_NAME",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "description": "Advertised description.",
+        "key": "AGENT_DESCRIPTION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "1.0.0",
+        "description": "Advertised version.",
+        "key": "AGENT_VERSION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "",
+        "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost.",
+        "key": "CLOUD_RUN_URL",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": false
+      },
+      {
+        "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+        "key": "A2A_AUTH_TOKEN",
+        "needed_by": [
+          "inbound_auth"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+        "key": "TASK_STORE_DSN",
+        "needed_by": [
+          "task_persistence"
+        ],
+        "required": false,
+        "secret": true
+      }
+    ],
+    "join_nodes": [],
+    "nodes": [
+      {
+        "canvas_id": "trigger",
+        "config": {
+          "input_mode": "json",
+          "output_variable": "order",
+          "payload_schema": {
+            "fields": [
+              {
+                "description": "What was ordered",
+                "name": "sku",
+                "required": true,
+                "type": "string"
+              },
+              {
+                "description": "How many",
+                "name": "qty",
+                "required": true,
+                "type": "integer"
+              }
+            ]
+          },
+          "state_key": "wf"
+        },
+        "is_entry": true,
+        "module": "nodes.a2a_start",
+        "name": "a2a_start",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Order",
+        "type": "A2A_START"
+      },
+      {
+        "canvas_id": "tier",
+        "config": {
+          "branches": [
+            {
+              "expression": "vars['priced']['total'] >= 100",
+              "name": "bulk"
+            },
+            {
+              "expression": "True",
+              "name": "standard"
+            }
+          ]
+        },
+        "module": "nodes.n_condition_6",
+        "name": "n_condition_6",
+        "on_error": "fail",
+        "retries": 1,
+        "routes": [
+          "bulk",
+          "standard"
+        ],
+        "timeout": 60,
+        "title": "Bulk?",
+        "type": "CONDITION"
+      },
+      {
+        "canvas_id": "end",
+        "config": {
+          "output_mapping": {}
+        },
+        "is_terminal": true,
+        "module": "nodes.n_end_2",
+        "name": "n_end_2",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "End",
+        "type": "END"
+      },
+      {
+        "canvas_id": "bulk",
+        "config": {
+          "expression": "result = {'tier': 'bulk', 'discount': 0.1}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_1",
+        "name": "n_transform_1",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Bulk Tier",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "label",
+        "config": {
+          "expression": "result = {'label': vars['order']['sku'] + ' x' + str(vars['order']['qty']) + ' = ' + str(vars['priced']['total'])}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_3",
+        "name": "n_transform_3",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Describe It",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "price",
+        "config": {
+          "expression": "result = {'total': (data.get('qty') or 0) * 25}",
+          "mode": "python",
+          "output_variable": "priced"
+        },
+        "module": "nodes.n_transform_4",
+        "name": "n_transform_4",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Price It",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "standard",
+        "config": {
+          "expression": "result = {'tier': 'standard', 'discount': 0}",
+          "mode": "python"
+        },
+        "module": "nodes.n_transform_5",
+        "name": "n_transform_5",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Standard Tier",
+        "type": "TRANSFORM"
+      }
+    ],
+    "schema_version": 1,
+    "terminal_node": "n_end_2",
+    "workflow": {
+      "canvas_version": 2,
+      "description": "Seed workflow: variables",
+      "name": "variables",
+      "slug": "variables",
+      "version_id": "golden-version-id"
+    }
+  },
+  "warnings": []
+}

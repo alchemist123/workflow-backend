@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 {% if plan.join_nodes %}
-from google.adk.workflow import JoinNode
+from nodes.merge import MergeNode
 {% endif %}
 {% for n in plan.nodes if not n.is_join %}
 from {{ n.module }} import {{ n.name }}
@@ -23,9 +23,13 @@ from {{ n.module }} import {{ n.name }}
 NODES: dict[str, Any] = {
 {% for n in plan.nodes %}
 {% if n.is_join %}
-    # MERGE waits for every predecessor, then hands the successor a dict keyed
-    # by predecessor node name.
-    {{ n.name | tojson }}: JoinNode(name={{ n.name | tojson }}),
+    # MERGE waits for every predecessor, then combines what they produced into
+    # one payload -- see nodes/merge.py for why the raw ADK shape is not it.
+    {{ n.name | tojson }}: MergeNode(
+        name={{ n.name | tojson }},
+        merge_mode={{ (n.config.get("merge_mode") or "merge") | tojson }},
+        sources={{ plan.join_sources.get(n.name, []) | pyliteral }},
+    ),
 {% else %}
     {{ n.name | tojson }}: {{ n.name }},
 {% endif %}
