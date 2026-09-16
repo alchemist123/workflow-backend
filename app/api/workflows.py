@@ -1,3 +1,5 @@
+import asyncio
+import json
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks  # BackgroundTasks used by execute
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -5,6 +7,7 @@ from sqlalchemy import select, func
 from app.database import get_db
 from app.models.workflow import Workflow, WorkflowVersion, WorkflowExecution, ExecutionStatus, WorkflowStatus
 from app.schemas.workflow import (
+    TaskLookupRequest,
     AnswerRequest,
     NodeInputsRequest,
     WorkflowCreate, WorkflowUpdate, WorkflowRead, WorkflowVersionRead,
@@ -187,6 +190,7 @@ async def _run_package_test(
     from datetime import datetime
 
     from app.database import AsyncSessionLocal
+    from app.runtime import progress
     from app.runtime.package_runner import run_workflow_package
 
     async with AsyncSessionLocal() as session:
@@ -197,10 +201,22 @@ async def _run_package_test(
         execution.started_at = datetime.utcnow()
         await session.commit()
 
-    run = await run_workflow_package(
-        plan, payload, mode=mode, rebuild=rebuild, answer=answer
-    )
-    await _record_run(execution_id, run)
+    try:
+        run = await run_workflow_package(
+            plan,
+            payload,
+            mode=mode,
+            rebuild=rebuild,
+            answer=answer,
+            on_progress=lambda step: progress.publish(execution_id, step),
+        )
+        await _record_run(execution_id, run)
+    finally:
+        # Recorded first, then the stream is closed: a subscriber reads the
+        # run's record the moment it is told the run finished, and would
+        # otherwise find it still marked running and never look again.
+        # Always closed, or a watching canvas sits on a spinner forever.
+        progress.finish(execution_id)
 
 
 async def _resume_package_test(
@@ -213,6 +229,7 @@ async def _resume_package_test(
 ) -> None:
     """Answer a parked task and record the run that follows."""
     from app.database import AsyncSessionLocal
+    from app.runtime import progress
     from app.runtime.package_runner import resume_workflow_package
 
     async with AsyncSessionLocal() as session:
@@ -222,14 +239,18 @@ async def _resume_package_test(
         execution.status = ExecutionStatus.RUNNING
         await session.commit()
 
-    run = await resume_workflow_package(
-        plan,
-        task_id=task_id,
-        context_id=context_id,
-        interrupt_id=interrupt_id,
-        response=response,
-    )
-    await _record_run(execution_id, run)
+    try:
+        run = await resume_workflow_package(
+            plan,
+            task_id=task_id,
+            context_id=context_id,
+            interrupt_id=interrupt_id,
+            response=response,
+            on_progress=lambda step: progress.publish(execution_id, step),
+        )
+        await _record_run(execution_id, run)
+    finally:
+        progress.finish(execution_id)
 
 
 async def _record_run(execution_id: str, run) -> None:
@@ -390,6 +411,126 @@ async def node_inputs(body: NodeInputsRequest):
         "inputs": [f.to_dict() for f in available_inputs(canvas, body.node_id)],
         "opaque": input_is_opaque(canvas, body.node_id),
     }
+
+
+@router.post("/{workflow_id}/versions/{version_id}/task")
+async def get_task(
+    workflow_id: str,
+    version_id: str,
+    body: TaskLookupRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Look one A2A task up against this version's package.
+
+    A plain `tasks/get`, the same request any other A2A caller would send. It
+    can answer at all because the package keeps its task store on disk, so a
+    task outlives the process that created it — which is what makes a task id
+    worth showing in the UI in the first place.
+
+    Read-only: a run parked on a human node stays parked. Answering it is
+    `POST .../executions/{id}/answer`.
+
+    Not recorded as an execution: looking at a task is not running one, and a
+    row per lookup would bury the actual runs.
+    """
+    from app.runtime.package_runner import lookup_task
+
+    task_id = (body.task_id or "").strip()
+    if not task_id:
+        raise HTTPException(status_code=422, detail="Enter a task id.")
+
+    result = await db.execute(
+        select(WorkflowVersion).where(
+            WorkflowVersion.id == version_id,
+            WorkflowVersion.workflow_id == workflow_id,
+        )
+    )
+    version = result.scalar_one_or_none()
+    if not version:
+        raise HTTPException(status_code=404, detail="Version not found")
+    if not version.is_valid or not version.ir_json:
+        raise HTTPException(
+            status_code=422,
+            detail="This version has validation errors, so it has no package to ask.",
+        )
+
+    wf = await _get_or_404(db, Workflow, workflow_id)
+    run = await lookup_task(_graph_plan_for(version, wf), task_id=task_id)
+
+    return {
+        # `not-found` is the ordinary answer for a task id from another
+        # workflow, or from before this version was last re-rendered — not a
+        # failure worth an error page.
+        "found": run.state != "not-found",
+        "state": run.state,
+        "task_id": task_id,
+        "result": run.result,
+        "error": run.error,
+        "input_required": run.input_required,
+        "duration_ms": run.duration_ms,
+    }
+
+
+@router.get("/{workflow_id}/executions/{execution_id}/events")
+async def execution_events(
+    workflow_id: str, execution_id: str, db: AsyncSession = Depends(get_db)
+):
+    """Server-sent events: one frame per node, while the run is still going.
+
+    Why not A2A: the package answers over A2A, and A2A reports *task* state,
+    not steps. With streaming enabled a three-node graph emits `submitted`,
+    `working`, `working`, and the metadata on those frames carries session and
+    invocation ids but no node path — ADK's event converter drops it, and only
+    emits a frame at all for an event carrying `content`, which here is just
+    the terminal node. So the A2A stream cannot say which node is running.
+    The package reports its own steps instead; see core/progress.py.
+
+    SSE rather than a WebSocket because the traffic is one-way and EventSource
+    reconnects on its own. The run is already a background task started by
+    `/test`, which returns the execution id before it finishes — so the canvas
+    has the id to subscribe with while the run is still in flight.
+    """
+    from fastapi.responses import StreamingResponse
+
+    from app.runtime import progress
+
+    # A run this process is not tracking will never produce a frame, and an
+    # open connection that never produces one is indistinguishable from a slow
+    # workflow — the canvas would sit on a spinner forever. This happens
+    # routinely: an EventSource reconnects after the run is over, or a stale
+    # tab asks about a run from before a restart.
+    execution = await db.get(WorkflowExecution, execution_id)
+    # WAITING is not over: a run parked on a human node resumes into a second
+    # stream, and the canvas should keep watching.
+    over = execution is None or execution.status in (
+        ExecutionStatus.SUCCESS,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELLED,
+    )
+    if over and not progress.is_live(execution_id):
+        async def done():
+            yield f"data: {json.dumps({'e': 'finished', 'replay': True})}\n\n"
+
+        return StreamingResponse(done(), media_type="text/event-stream")
+
+    async def frames():
+        try:
+            async for step in progress.subscribe(execution_id):
+                yield f"data: {json.dumps(step)}\n\n"
+        except asyncio.CancelledError:  # the tab closed; nothing to clean up
+            raise
+
+    return StreamingResponse(
+        frames(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # nginx buffers text/event-stream by default, which turns a live
+            # feed into one delivery at the end.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/{workflow_id}/executions", response_model=list[ExecutionRead])

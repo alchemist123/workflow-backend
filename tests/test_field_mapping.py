@@ -198,11 +198,14 @@ def test_an_expression_transform_is_opaque():
 
 
 def test_a_tool_edge_is_not_a_flow_edge():
-    """An MCP tool is wired into a consumer; it is not upstream of it."""
+    """A TOOL is wired into a consumer's tools handle; it is not upstream of it.
+
+    (MCP_TOOL is the other kind — a step in the flow — so it *would* be.)
+    """
     canvas = _canvas(
         _MAPPING,
-        extra_nodes=[_node("tool", "MCP_TOOL", {"server_url": "http://x",
-                                                "tool_name": "t"})],
+        extra_nodes=[_node("tool", "TOOL", {"mcp_url": "http://x",
+                                            "tool_name": "t"})],
         extra_edges=[_edge("tool", "map", "output", target_handle="tools")],
     )
     assert not input_is_opaque(_payload(canvas), "map")

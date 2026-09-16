@@ -4,6 +4,7 @@ from .remote_agent import RemoteAgentNode
 from .function import FunctionNode
 from .llm_agent import LlmAgentNode
 from .tool import ToolNode
+from .mcp_tool import McpToolNode
 from .condition import ConditionNode
 from .loop import LoopNode
 from .transform import TransformNode
@@ -20,7 +21,7 @@ from .parallel_agent import ParallelAgentNode
 
 __all__ = [
     "AgentNode", "OrchestratorAgentNode", "RemoteAgentNode", "FunctionNode",
-    "LlmAgentNode", "ToolNode", "ConditionNode", "LoopNode",
+    "LlmAgentNode", "ToolNode", "McpToolNode", "ConditionNode", "LoopNode",
     "TransformNode", "EndNode", "DataSourceNode", "HumanApprovalNode", "HumanInputNode", "WaitNode",
     "SubworkflowNode", "ParallelForkNode", "MergeNode",
     "SequentialAgentNode", "ParallelAgentNode",

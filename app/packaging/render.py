@@ -18,6 +18,7 @@ would fail on import fails the build instead.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import py_compile
@@ -44,6 +45,8 @@ STATIC_FILES: tuple[str, ...] = (
     "core/state.py",
     "core/variables.py",
     "core/logging.py",
+    "core/mapping.py",
+    "core/progress.py",
     "nodes/__init__.py",
     "nodes/base.py",
     "nodes/merge.py",
@@ -78,6 +81,7 @@ NODE_TEMPLATES: dict[str, str] = {
     "WAIT": "nodes/wait.py.j2",
     "PARALLEL_FORK": "nodes/parallel_fork.py.j2",
     "TOOL": "nodes/mcp_tool.py.j2",
+    "MCP_TOOL": "nodes/mcp_call.py.j2",
     "DATASOURCE": "nodes/mcp_tool.py.j2",
     "REMOTE_AGENT": "nodes/remote_agent.py.j2",
     "ORCHESTRATOR_AGENT": "nodes/agent_node.py.j2",
@@ -135,10 +139,14 @@ def _environment() -> Environment:
 # ── Canvas code bodies ───────────────────────────────────────────────────────
 
 
-def _output_fields(config: dict, canvas_id: str) -> list[dict]:
-    """The declared output shape, cleaned for embedding."""
+def _mapping_fields(fields: list | None) -> list[dict]:
+    """A canvas field mapping, cleaned for embedding.
+
+    Shared by a TRANSFORM's output fields and an MCP_TOOL's arguments: they are
+    the same shape, read by the same `core/mapping.py` at run time.
+    """
     cleaned: list[dict] = []
-    for field in config.get("output_fields") or []:
+    for field in fields or []:
         name = (field.get("name") or "").strip()
         if not name:
             continue
@@ -152,7 +160,12 @@ def _output_fields(config: dict, canvas_id: str) -> list[dict]:
         if "default" in field and field["default"] is not None:
             entry["default"] = field["default"]
         cleaned.append(entry)
+    return cleaned
 
+
+def _output_fields(config: dict, canvas_id: str) -> list[dict]:
+    """The declared output shape. A transform that builds nothing is an error."""
+    cleaned = _mapping_fields(config.get("output_fields"))
     if not cleaned:
         raise RenderError(
             f"Canvas node '{canvas_id}' (TRANSFORM) builds no fields. Add at "
@@ -446,6 +459,29 @@ def _node_context(node: PlannedNode, plan: GraphPlan) -> dict[str, Any]:
             "token_env_key": env.get("auth_token", "A2A_AUTH_TOKEN"),
         }
 
+    if node.node_type == "MCP_TOOL":
+        tool_name = config.get("tool_name") or ""
+        if not tool_name:
+            raise RenderError(
+                f"Canvas node '{node.canvas_id}' (MCP_TOOL) has no tool name. "
+                "Fetch the server's tools and pick one."
+            )
+        if "mcp_url" not in env:
+            raise RenderError(
+                f"Canvas node '{node.canvas_id}' has no MCP URL environment "
+                "variable; the graph plan is stale, so re-save the workflow."
+            )
+        arg_mode = config.get("arg_mode") or "fields"
+        return {
+            **base,
+            "tool_name": tool_name,
+            "arg_mode": arg_mode,
+            "arg_fields": _mapping_fields(config.get("arg_fields")),
+            "result_key": (config.get("result_key") or "").strip(),
+            "url_env_key": env["mcp_url"],
+            "token_env_key": env.get("auth_token", "A2A_AUTH_TOKEN"),
+        }
+
     if node.node_type == "REMOTE_AGENT":
         if "endpoint" not in env:
             raise RenderError(
@@ -507,6 +543,7 @@ def _node_context(node: PlannedNode, plan: GraphPlan) -> dict[str, Any]:
 _NETWORK_NODE_TYPES = {
     "REMOTE_AGENT": "remote A2A agents",
     "TOOL": "MCP tool servers",
+    "MCP_TOOL": "MCP tool servers",
     "DATASOURCE": "MCP data sources",
     "ORCHESTRATOR_AGENT": "a language model",
     "AGENT": "a language model",
@@ -541,7 +578,7 @@ def _requirements_context(plan: GraphPlan) -> dict[str, Any]:
     for node in plan.nodes:
         tool_kinds |= _tool_kinds((node.config or {}).get("resolved_tools") or {})
 
-    has_mcp = bool(types & {"TOOL", "DATASOURCE"}) or "mcp" in tool_kinds
+    has_mcp = bool(types & {"TOOL", "DATASOURCE", "MCP_TOOL"}) or "mcp" in tool_kinds
     has_remote = "REMOTE_AGENT" in types or "a2a" in tool_kinds
 
     jinja_reasons = []
@@ -557,7 +594,7 @@ def _requirements_context(plan: GraphPlan) -> dict[str, Any]:
         "needs_httpx": has_remote,
         "httpx_reason": "REMOTE_AGENT nodes and A2A agent tools",
         "needs_mcp": has_mcp,
-        "mcp_reason": "TOOL / DATASOURCE nodes and MCP agent tools",
+        "mcp_reason": "MCP_TOOL / TOOL / DATASOURCE nodes and MCP agent tools",
         "needs_jmespath": "jmespath" in transform_modes,
         "needs_jinja2": bool(jinja_reasons),
         "jinja_reason": " and ".join(jinja_reasons) or "template rendering",
@@ -655,6 +692,38 @@ def ascii_graph(plan: GraphPlan) -> str:
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
+
+
+# Written into every package: the version of the template that produced it.
+FINGERPRINT_FILE = ".template-fingerprint"
+
+# Where a package keeps its A2A tasks and ADK sessions. Mirrors STATE_DIR in
+# the template's run_once.py; a test pins the two together.
+STATE_DIR_NAME = ".runs"
+
+_fingerprint_cache: str | None = None
+
+
+def template_fingerprint() -> str:
+    """A hash of everything a package is rendered from.
+
+    Cheap enough to compute once per process — the template is a few dozen
+    small files — and it is the only honest answer to "was this package built
+    by the code running now?".
+    """
+    global _fingerprint_cache
+    if _fingerprint_cache is not None:
+        return _fingerprint_cache
+
+    digest = hashlib.sha256()
+    for root in (TEMPLATE_DIR, RENDER_TEMPLATE_DIR):
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            digest.update(str(path.relative_to(root)).encode())
+            digest.update(path.read_bytes())
+    _fingerprint_cache = digest.hexdigest()
+    return _fingerprint_cache
 
 
 def render_package(plan: GraphPlan, destination: Path, *, port: int = 8080) -> RenderedPackage:
@@ -803,10 +872,35 @@ def render_package(plan: GraphPlan, destination: Path, *, port: int = 8080) -> R
         _byte_compile(staging)
         _verify_imports(staging)
 
+        # Stamp what rendered this, so a package built by an older platform is
+        # not silently reused. Reuse is otherwise keyed on the plan alone, and
+        # a plan is unchanged by an edit to the template — so a template fix
+        # would reach new workflows and quietly skip every existing one.
+        (staging / FINGERPRINT_FILE).write_text(template_fingerprint())
+
+        # The package's task store is data, not generated code: `.runs/`
+        # holds every A2A task and ADK session the package has created, which
+        # is what lets a task be looked up, or a run parked on a human node be
+        # answered, by a later process. Deleting the directory wholesale took
+        # those with it — so a re-render silently made every outstanding
+        # approval unanswerable and every task id a dead link.
+        #
+        # Carried across rather than regenerated. A session written by an older
+        # graph may not resume cleanly into a new one, but that reports an
+        # error the user can act on, where a wipe reports nothing at all.
+        preserved = None
+        if (destination / STATE_DIR_NAME).is_dir():
+            preserved = Path(tempfile.mkdtemp(prefix="wf-state-"))
+            shutil.move(str(destination / STATE_DIR_NAME), str(preserved / STATE_DIR_NAME))
+
         if destination.exists():
             shutil.rmtree(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(staging), str(destination))
+
+        if preserved is not None:
+            shutil.move(str(preserved / STATE_DIR_NAME), str(destination / STATE_DIR_NAME))
+            shutil.rmtree(preserved, ignore_errors=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 

@@ -243,6 +243,130 @@ Both fail while running rather than at import, so they are worth memorising:
 The validator catches both when you Save & Compile, which is why it complains
 about two END nodes.
 
+## Watching a Run as It Happens
+
+The Test panel paints each node on the canvas as the run reaches it. That needs
+a channel from the running package back to the browser, and the obvious
+candidate — A2A — is the wrong one.
+
+### Why not A2A
+
+The package answers over A2A, and A2A streaming is real: `message/stream`
+returns server-sent events. But it reports **task** state, not steps. Measured
+against a2a-sdk 0.3.26 and google-adk 2.8.0:
+
+- the package's agent card declares `streaming=False`, and the SDK refuses the
+  method outright when it does: *"Streaming is not supported by the agent"*;
+- turning it on works, but a three-node graph produced **three** frames —
+  `submitted`, `working`, `working`. ADK's converter only emits an A2A event
+  for an ADK event carrying `content`, and only the terminal node emits content
+  (see `terminal_event` in `nodes/base.py`). Making every node emit content
+  purely to be observable would change what the agent returns to every real
+  caller;
+- and those frames carry `adk_app_name`, `adk_user_id`, `adk_session_id`,
+  `adk_invocation_id`, `author`, `event_id` — and no node path.
+  `_get_context_metadata` in ADK's event converter is the whole of it, and
+  `node_info` is not there.
+
+So nothing on the A2A wire says which node is running. "The nth `working` frame
+is the nth node" would be the only option, and it breaks the moment a parallel
+fork or a loop is involved.
+
+### What it does instead
+
+The package reports its own steps, one JSON object per line, prefixed
+`@@PROGRESS ` on **stderr** — stdout carries the run's JSON envelope, and a
+prefix rather than a log record because the platform runs the package at
+`LOG_LEVEL=WARNING`. It is off unless `WORKFLOW_PROGRESS=1`, so a plain
+`python run_once.py` stays readable.
+
+Two emit points, both at seams that already existed:
+
+| Frame | Emitted by | Meaning |
+|-------|-----------|---------|
+| `start` | the `flow_node` wrapper in `nodes/base.py`, and `MergeNode._run_impl` | the node is running |
+| `end` | the traced `runner.run_async` in `run_once.py` | the node finished |
+| `error` | the `flow_node` wrapper | the node raised |
+
+Then:
+
+```
+run_once.py  --stderr-->  package_runner._drain   (reads line by line,
+                                                   not communicate())
+             --callback-> app/runtime/progress.py (one asyncio.Queue per
+                                                   subscriber, bounded)
+             --SSE------> GET /workflows/{id}/executions/{id}/events
+             --EventSource-> workflowStore.watchExecution -> nodeStatus
+```
+
+`POST .../test` already returns the execution id before the run starts — the
+run is a background task — so the canvas has an id to subscribe with while the
+run is still in flight.
+
+Design notes worth knowing:
+
+- **One queue per subscriber**, not one shared queue: a shared one would let
+  the first reader consume a step the second never sees.
+- **Dropped-oldest on overflow.** A subscriber that stopped reading (a closed
+  laptop, a dead connection) must not stall the run feeding it.
+- **A short replay buffer**, so a canvas subscribing a moment late still sees
+  the nodes that already finished instead of a blank run.
+- **The runner fills in the canvas id.** A `start` knows only the generated
+  node name; an `end` carries the canvas id. Without that, a node would light
+  up as "running" under one id and "success" under another.
+- **A stream nobody is tracking ends immediately.** A connection that will
+  never produce a frame is indistinguishable from a slow workflow, and would
+  hold the canvas on a spinner forever.
+- **It is in memory**, so it is one backend instance only. That is the right
+  trade for the Test panel, which watches a run it started itself; a scaled
+  deployment would swap `app/runtime/progress.py` for Redis pub/sub and nothing
+  outside it would change.
+
+### Checking a task after the fact
+
+Task mode hands the caller an id and returns. That id is the handle to the run,
+and it outlives the process that created it, because the package keeps its A2A
+tasks and ADK sessions in `.runs/tasks.db` beside itself rather than in memory.
+
+So the Runs panel has **Check a task by id**: paste one, and the platform sends
+a plain `tasks/get` to the package — the same request any other A2A caller
+would send. It answers for a task from an earlier run, or one submitted from
+outside the UI entirely, as long as it shares that store. It is read-only: a
+run parked on a human node shows as `input-required` and stays parked;
+answering it is still Approve / Reject on the run.
+
+| Layer | |
+|---|---|
+| `run_once.py --task <id>` | one `tasks/get`, prints the envelope, changes nothing |
+| `lookup_task()` in `package_runner` | drives that, never raises |
+| `POST .../versions/{id}/task` | `{task_id}` → state, result, `input_required` |
+| Runs panel | the id on every row (click to copy) and the lookup box |
+
+An unknown id answers `found: false` rather than erroring — a task id from a
+different workflow is the ordinary case, not a crash.
+
+**Rendering no longer destroys the store.** `render_package` deletes the
+destination before moving the new package into place, and `.runs/` was inside
+it — so a re-render silently made every outstanding approval unanswerable and
+every task id a dead link. `.runs/` is now carried across: it is data, and the
+rest of the package is generated code. A session written by an older graph may
+not resume cleanly into a new one, but that reports an error someone can act
+on, where a wipe reported nothing at all.
+
+---
+
+### Packages are stamped with the template that built them
+
+Package directories are reused when the rendered graph still matches the plan —
+and a plan is *unchanged* by an edit to the template, so a fix to the generated
+code would reach new workflows and silently skip every package already on disk.
+This feature hit exactly that: its first run against an existing package
+produced no frames and no error. Every package now carries a
+`.template-fingerprint`, a hash of the template tree, and is re-rendered when
+it does not match.
+
+---
+
 ## Step 5 — The Node Types
 
 ### The entry node
@@ -274,6 +398,75 @@ disagree.
 | `DATASOURCE` | Same as TOOL, semantically for read-only data sources. |
 | `REMOTE_AGENT` | Calls another AI agent via the A2A protocol. Looks like just another tool to the orchestrator. |
 | `FUNCTION` | Inline Python code you write directly in the config panel. |
+
+### Calling an MCP tool directly
+
+`MCP_TOOL` calls one named tool on one MCP server, as an ordinary step: every
+time the flow reaches it, with arguments the canvas maps. That is the opposite
+end of the same idea from `TOOL`, which is a tool *provider* — wired into an
+agent's tools handle so a model may choose to call it. Both are useful; reach
+for `MCP_TOOL` when the workflow already knows which tool it needs.
+
+**Fetch tools.** Enter the server URL, press the button, and the panel asks the
+server what it has. Picking a tool from the list fills in one argument row per
+parameter it declares — the right names, the right types, the required ones
+marked — each with the same source dropdown a TRANSFORM uses. The tool's input
+schema is also cached on the node as `tool_schema`, which is what lets the
+compiler check the arguments at build time without making a network call of its
+own. A node whose tools were never fetched still compiles; there is simply less
+to check.
+
+**Arguments are mapped, not forwarded.** `TOOL` sends the whole incoming
+payload as the tool's arguments, which works only when the payload happens to
+match the tool's schema and fails the moment it carries an extra key — and a
+payload accumulates keys from every earlier node. `MCP_TOOL` defaults to
+mapping each argument from what is actually available upstream, through the
+same `core/mapping.py` a TRANSFORM in `fields` mode uses. `arg_mode:
+"passthrough"` restores the old behaviour for a tool whose schema matches what
+the previous node produces; the validator warns when the tool declares a schema.
+
+**Reaching a server someone typed the URL of.** A base URL, a `/mcp` endpoint
+and a `/sse` endpoint are all tried, in that order, with an explicit path
+always tried as given before anything is appended. The client used to append
+`/mcp` unconditionally, which turned a working `https://host/sse` into a 404
+and reported it as the server being unreachable.
+
+**What comes back.** Many MCP servers — the stock `mcp.server.fastmcp`
+included — return their result as JSON *text* with no `structuredContent` at
+all. `unwrap_result` parses it, so the tool's own keys land on the payload and
+the next node reads `data.total` rather than a JSON string it cannot index. Set
+`result_key` to nest the result under one key instead, when its keys would
+collide with the payload's. A tool that fails becomes the same shape as any
+other failed node: raised, or an `_error` payload a CONDITION can branch on
+when `on_error` is `continue`.
+
+**Why not FastMCP.** The obvious choice for the client, and measured against
+it: `fastmcp` 4.x pulls `fastmcp-slim[client]`, which depends on `mcp-types`
+2.x — a second MCP type system alongside the `mcp>=1.9,<2` this project pins
+and google-adk's own MCP toolset uses, plus `rich`, `platformdirs` and
+`email-validator` in every shipped workflow container. The one thing it offered
+that the official SDK does not is transport inference, which is the ~30 lines
+of `candidates()` above. The official SDK was already there, already used by
+the agent tool path, and already pinned.
+
+**Where the credentials go.** `mcp_url` and `auth_token` are declared secrets,
+so the compiler moves them to environment variables and strips them from the
+config. The generated module reads `MCP_<NODE>_URL` with no literal fallback —
+an MCP URL can embed basic-auth credentials and `nodes/` is committed to git.
+The canvas values become defaults in `.env`, which is gitignored.
+
+`test-agents/workflows/seed_mcp_tool.py` is a working example, and
+`backend/tests/support/demo_mcp_server.py` is a real MCP server to point it at:
+
+```
+python backend/tests/support/demo_mcp_server.py 8000 0.0.0.0
+```
+
+`0.0.0.0` because the platform runs in a container, where `localhost` is the
+backend itself — pointing an MCP node at `localhost` from there gets a 404 and
+reads as "not an MCP server". Use `host.docker.internal` in the node's URL.
+
+---
 
 ### Flow control nodes
 

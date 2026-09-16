@@ -1,5 +1,6 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
@@ -136,6 +137,38 @@ async def delete_datasource(ds_id: str, db: AsyncSession = Depends(get_db)):
     await db.delete(ds)
 
 
+# ─── MCP tool discovery ──────────────────────────────────────────────────────
+
+mcp_router = APIRouter(prefix="/mcp")
+
+
+class McpDiscoverRequest(BaseModel):
+    """What the Fetch tools button sends."""
+
+    url: str
+    auth_token: str = ""
+
+
+@mcp_router.post("/tools")
+async def discover_mcp_tools(body: McpDiscoverRequest):
+    """List the tools on an MCP server, for the MCP_TOOL node's picker.
+
+    Answers 200 with an `error` string rather than raising: a wrong URL or a
+    refused token is something the person editing the node needs to read, and
+    a red toast saying "500" tells them nothing.
+
+    This is the platform making a request to a URL the user typed. That is the
+    whole point of a no-code MCP builder, but it does mean the backend can be
+    aimed at hosts the browser cannot reach — worth knowing when this is
+    deployed somewhere with private network access. Nothing in the response is
+    executed; it is read as data and shown.
+    """
+    from app.runtime.mcp_discovery import list_tools
+
+    tools, error = await list_tools(body.url, body.auth_token)
+    return {"tools": [t.to_dict() for t in tools], "error": error}
+
+
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 async def _get_or_404(db: AsyncSession, model, id: str):
@@ -151,3 +184,4 @@ def include_resource_routers(app):
     app.include_router(model_router)
     app.include_router(tool_router)
     app.include_router(datasource_router)
+    app.include_router(mcp_router)

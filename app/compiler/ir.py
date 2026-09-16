@@ -84,6 +84,7 @@ _KIND_MAP = {
     "FUNCTION": "task.function",
     "LLM_AGENT": "agent.llm",
     "TOOL": "task.tool",
+    "MCP_TOOL": "task.mcp_tool",
     "CONDITION": "task.condition",
     "LOOP": "task.loop",
     "TRANSFORM": "task.transform",

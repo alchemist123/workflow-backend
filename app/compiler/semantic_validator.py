@@ -18,6 +18,8 @@ is not obvious from the canvas:
     rather than an error.
 """
 
+from typing import Any
+
 import networkx as nx
 
 from app.compiler.inputs import available_inputs, input_is_opaque
@@ -37,6 +39,136 @@ from app.schemas.canvas import CanvasPayload
 
 # Nodes whose outbound edges are named branches rather than plain flow.
 _BRANCH_NODES = BRANCH_NODE_TYPES
+
+
+
+def _check_mapping(
+    canvas: Any,
+    node: Any,
+    fields: list[dict],
+    what: str,
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    """Check a canvas field mapping against what is actually readable here.
+
+    Shared by a TRANSFORM's output fields and an MCP_TOOL's arguments: both
+    describe "build this from what is available", both are offered from the
+    same picker, and both are read by the same `core/mapping.py` at run time.
+    One implementation means the checks cannot drift apart from each other or
+    from what the generated code does.
+    """
+    known = {f.path: f for f in available_inputs(canvas, node.id)}
+    opaque = input_is_opaque(canvas, node.id)
+    seen_names: set[str] = set()
+
+    for index, field in enumerate(fields):
+        name = (field.get("name") or "").strip()
+        label = name or f"{what} {index + 1}"
+        if not name:
+            errors.append(f"Node '{node.id}' ({node.type}) has an {what} with no name.")
+        elif name in seen_names:
+            errors.append(f"Node '{node.id}' ({node.type}) builds '{name}' twice.")
+        seen_names.add(name)
+
+        source = (field.get("source") or "").strip()
+        if not source:
+            if "default" in field and field["default"] is not None:
+                continue  # a constant, not a mapping
+            errors.append(
+                f"Node '{node.id}' ({node.type}): '{label}' has no source. "
+                "Pick where its value comes from, or give it a default."
+            )
+            continue
+
+        match = known.get(source) or known.get(f"data.{source}")
+        if match is None:
+            # `vars.x.y.z` is fine when `vars.x` is known but its shape is not
+            # -- the lookup just goes deeper at runtime.
+            prefix_known = any(source.startswith(f"{path}.") for path in known)
+            if prefix_known or opaque:
+                warnings.append(
+                    f"Node '{node.id}' ({node.type}): '{label}' reads "
+                    f"'{source}', which the canvas cannot confirm is present. "
+                    "It will be skipped at runtime if absent."
+                )
+            else:
+                available = ", ".join(sorted(known)[:6]) or "nothing declared upstream"
+                errors.append(
+                    f"Node '{node.id}' ({node.type}): '{label}' reads "
+                    f"'{source}', which nothing upstream produces. "
+                    f"Available here: {available}."
+                )
+            continue
+
+        wanted = field.get("type") or "string"
+        if wanted != match.type and match.type != "any" and wanted != "any":
+            # Compatible enough to convert, so this is a note not a block.
+            warnings.append(
+                f"Node '{node.id}' ({node.type}): '{label}' is declared "
+                f"{wanted} but '{source}' is {match.type}. It will be "
+                "converted, or passed through unchanged if it cannot be."
+            )
+
+
+def _check_mcp_tool(
+    canvas: Any, node: Any, errors: list[str], warnings: list[str]
+) -> None:
+    """A direct MCP tool call: reachable server, named tool, arguments that fit.
+
+    The tool's own input schema is cached on the node when the config panel
+    fetches the server's tools, so the arguments can be checked here without
+    the compiler making a network call during a build. A node whose schema was
+    never fetched still compiles -- the checks simply have less to say.
+    """
+    config = node.config or {}
+
+    if not (config.get("mcp_url") or "").strip():
+        errors.append(
+            f"Node '{node.id}' (MCP_TOOL) has no server URL. Enter one and "
+            "fetch the server's tools."
+        )
+    if not (config.get("tool_name") or "").strip():
+        errors.append(
+            f"Node '{node.id}' (MCP_TOOL) names no tool. Fetch the server's "
+            "tools and pick one."
+        )
+
+    schema = config.get("tool_schema") or {}
+    declared = {(p or "").strip() for p in (schema.get("properties") or {})}
+    required = {(r or "").strip() for r in (schema.get("required") or [])}
+
+    if (config.get("arg_mode") or "fields") != "fields":
+        # Passthrough sends the whole payload, which carries keys from every
+        # earlier node -- fine for a permissive server, a schema error on a
+        # strict one.
+        if declared:
+            warnings.append(
+                f"Node '{node.id}' (MCP_TOOL) sends the whole payload as "
+                f"arguments, but '{config.get('tool_name')}' declares "
+                f"{len(declared)}. A server that validates its input strictly "
+                "will reject the extra keys; map the arguments instead."
+            )
+        return
+
+    fields = config.get("arg_fields") or []
+    _check_mapping(canvas, node, fields, "argument", errors, warnings)
+
+    mapped = {(f.get("name") or "").strip() for f in fields}
+    mapped.discard("")
+
+    for missing in sorted(required - mapped):
+        errors.append(
+            f"Node '{node.id}' (MCP_TOOL): '{config.get('tool_name')}' requires "
+            f"the argument '{missing}', which is not mapped."
+        )
+
+    for extra in sorted(mapped - declared) if declared else []:
+        warnings.append(
+            f"Node '{node.id}' (MCP_TOOL) sends '{extra}', which "
+            f"'{config.get('tool_name')}' does not declare. Re-fetch the "
+            "server's tools if it has changed."
+        )
 
 
 def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
@@ -369,65 +501,10 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
                     f"Node '{node.id}' (TRANSFORM) builds no fields. Add at "
                     "least one output field, or switch to an expression mode."
                 )
+            _check_mapping(canvas, node, declared, "output field", errors, warnings)
 
-            known = {f.path: f for f in available_inputs(canvas, node.id)}
-            opaque = input_is_opaque(canvas, node.id)
-            seen_names: set[str] = set()
-
-            for index, field in enumerate(declared):
-                name = (field.get("name") or "").strip()
-                label = name or f"field {index + 1}"
-                if not name:
-                    errors.append(
-                        f"Node '{node.id}' (TRANSFORM) has an output field with "
-                        "no name."
-                    )
-                elif name in seen_names:
-                    errors.append(
-                        f"Node '{node.id}' (TRANSFORM) builds '{name}' twice."
-                    )
-                seen_names.add(name)
-
-                source = (field.get("source") or "").strip()
-                if not source:
-                    if "default" in field and field["default"] is not None:
-                        continue  # a constant, not a mapping
-                    errors.append(
-                        f"Node '{node.id}' (TRANSFORM): '{label}' has no source. "
-                        "Pick where its value comes from, or give it a default."
-                    )
-                    continue
-
-                match = known.get(source) or known.get(f"data.{source}")
-                if match is None:
-                    # `vars.x.y.z` is fine when `vars.x` is known but its shape
-                    # is not -- the lookup just goes deeper at runtime.
-                    prefix_known = any(
-                        source.startswith(f"{path}.") for path in known
-                    )
-                    if prefix_known or opaque:
-                        warnings.append(
-                            f"Node '{node.id}' (TRANSFORM): '{label}' reads "
-                            f"'{source}', which the canvas cannot confirm is "
-                            "present. It will be skipped at runtime if absent."
-                        )
-                    else:
-                        available = ", ".join(sorted(known)[:6]) or "nothing declared upstream"
-                        errors.append(
-                            f"Node '{node.id}' (TRANSFORM): '{label}' reads "
-                            f"'{source}', which nothing upstream produces. "
-                            f"Available here: {available}."
-                        )
-                    continue
-
-                wanted = field.get("type") or "string"
-                if wanted != match.type and match.type != "any" and wanted != "any":
-                    # Compatible enough to convert, so this is a note not a block.
-                    warnings.append(
-                        f"Node '{node.id}' (TRANSFORM): '{label}' is declared "
-                        f"{wanted} but '{source}' is {match.type}. It will be "
-                        "converted, or passed through unchanged if it cannot be."
-                    )
+        if node.type == "MCP_TOOL":
+            _check_mcp_tool(canvas, node, errors, warnings)
 
         # A variable name that cannot be bound would simply never appear, so
         # it is caught here rather than discovered in an expression.

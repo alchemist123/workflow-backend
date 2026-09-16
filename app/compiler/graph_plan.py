@@ -612,7 +612,7 @@ def _collect_env_keys(
                         entry.default = str(config[config_key])
 
         # ── A tool or remote agent sitting in the flow ───────────────────────
-        if node.node_type in ("TOOL", "DATASOURCE"):
+        if node.node_type in ("TOOL", "DATASOURCE", "MCP_TOOL"):
             var = _env_var_name("MCP", label, "URL", taken)
             keys.append(
                 EnvKey(

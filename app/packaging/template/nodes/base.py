@@ -37,6 +37,7 @@ from typing import Any
 from google.adk import Event
 from google.adk.workflow import RetryConfig, node
 
+from core.progress import emit as emit_progress
 from core.state import as_text
 from core.variables import set_variable
 
@@ -58,7 +59,15 @@ def flow_node(*, name: str, variable: str = "", **kwargs):
     def decorate(func):
         @functools.wraps(func)
         async def wrapper(ctx, node_input=None):
-            event = await func(ctx, node_input)
+            # A node is only observable from outside when it *finishes* -- ADK
+            # yields its event on the way out -- so the "started" half is
+            # reported here, where every node already passes through.
+            emit_progress("start", name)
+            try:
+                event = await func(ctx, node_input)
+            except BaseException as exc:
+                emit_progress("error", name, error=str(exc))
+                raise
             if variable and isinstance(event, Event) and event.output is not None:
                 set_variable(ctx, variable, event.output)
             return event

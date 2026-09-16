@@ -90,6 +90,12 @@ class AnswerRequest(BaseModel):
     response: dict[str, Any] = {}
 
 
+class TaskLookupRequest(BaseModel):
+    """Look one A2A task up by id, without running or answering anything."""
+
+    task_id: str
+
+
 class TestRunRequest(BaseModel):
     """Input for a test run against the generated package."""
 

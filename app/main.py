@@ -4,7 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import engine, Base
 from app.api.workflows import router as workflow_router
-from app.api.resources import agent_router, model_router, tool_router, datasource_router
+from app.api.resources import (
+    agent_router, model_router, tool_router, datasource_router, mcp_router,
+)
 
 settings = get_settings()
 
@@ -36,6 +38,7 @@ app.include_router(agent_router, prefix="/api/v1")
 app.include_router(model_router, prefix="/api/v1")
 app.include_router(tool_router, prefix="/api/v1")
 app.include_router(datasource_router, prefix="/api/v1")
+app.include_router(mcp_router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health")

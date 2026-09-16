@@ -110,6 +110,12 @@ def _declared_fields(node: Any) -> list[tuple[str, str]] | None:
         ]
         return [("approved", "boolean"), ("comment", "string"), *collected]
 
+    if node_type == "MCP_TOOL":
+        # What a tool returns is the server's business, not the canvas's --
+        # `result_key` is the one thing that is knowable, and only when set.
+        key = (config.get("result_key") or "").strip()
+        return [(key, "object")] if key else None
+
     if node_type == "WAIT":
         return [("waited_seconds", "number")]
 

@@ -8,6 +8,9 @@ from google.adk import Event
 from google.adk.agents.context import Context
 
 from core.logging import node_logger
+{% if mode == "fields" %}
+from core.mapping import build as build_mapping
+{% endif %}
 from core.state import merge_state
 from core.variables import all_variables
 from nodes.base import NODE_KWARGS, flow_node, node_error
@@ -32,62 +35,6 @@ OUTPUT_KEY = {{ output_key | tojson }}
 log = node_logger(NODE_ID)
 
 
-{% if mode == "fields" %}
-_PY_TYPES = {
-    "string": str, "text": str, "number": float,
-    "integer": int, "boolean": bool, "object": dict, "array": list,
-}
-
-
-def _resolve(path: str, data: dict, variables: dict):
-    """Follow a mapping path, returning (value, found).
-
-    `found` is separate from the value because `None` and `0` are legitimate
-    values — treating a falsy result as "missing" would quietly swap a real
-    zero for a default.
-    """
-    parts = [p for p in (path or "").split(".") if p]
-    if not parts:
-        return None, False
-
-    head, *rest = parts
-    if head == "vars":
-        if not rest:
-            return variables, True
-        current: object = variables
-    elif head == "data":
-        current = data
-    else:
-        # A bare name reads from the payload, so 'qty' and 'data.qty' agree.
-        current, rest = data, parts
-
-    for part in rest:
-        if isinstance(current, dict) and part in current:
-            current = current[part]
-        else:
-            return None, False
-    return current, True
-
-
-def _coerce(value, target: str | None):
-    """Best-effort cast to the declared type, leaving the value alone if it cannot."""
-    caster = _PY_TYPES.get(target or "")
-    if caster is None or value is None or isinstance(value, caster):
-        return value
-    try:
-        if caster is bool and isinstance(value, str):
-            return value.strip().lower() in ("true", "yes", "1", "on")
-        return caster(value)
-    except (TypeError, ValueError):
-        # A declared type is a statement of intent, not a reason to fail a run.
-        log.warning(
-            "could not convert %r to %s; passing it through unchanged",
-            value, target,
-        )
-        return value
-
-
-{% endif %}
 def _transform(data: dict, vars: dict) -> dict:  # noqa: A002 - `vars` is the canvas name
     """The canvas expression, emitted as ordinary Python.
 
@@ -113,21 +60,7 @@ def _transform(data: dict, vars: dict) -> dict:  # noqa: A002 - `vars` is the ca
         return {"result": rendered}
     return parsed if isinstance(parsed, dict) else {"result": parsed}
 {% elif mode == "fields" %}
-    out: dict = {}
-    for field in OUTPUT_FIELDS:
-        value, found = _resolve(field.get("source") or "", data, vars)
-        if not found:
-            if "default" in field:
-                value = field["default"]
-            elif field.get("required"):
-                raise ValueError(
-                    f"{NODE_ID}: required field {field['name']!r} has no value — "
-                    f"{field.get('source')!r} was not present in the input."
-                )
-            else:
-                continue
-        out[field["name"]] = _coerce(value, field.get("type"))
-    return out
+    return build_mapping(OUTPUT_FIELDS, data, vars, where=NODE_ID)
 {% else %}
     result = None
 {{ python_body }}

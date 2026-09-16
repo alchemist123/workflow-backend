@@ -140,7 +140,7 @@ def test_every_credentialish_config_key_is_declared_secret():
 
     # Names that match the shape but hold a field name, not a credential. Listed
     # explicitly so a genuinely new credential still trips the check.
-    benign = {"state_key", "output_key", "message_key", "items_key"}
+    benign = {"state_key", "output_key", "message_key", "items_key", "result_key"}
 
     for node_type, definition in NODE_REGISTRY.items():
         properties = (definition.config_schema or {}).get("properties") or {}

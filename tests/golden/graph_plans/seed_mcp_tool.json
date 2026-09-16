@@ -1,0 +1,310 @@
+{
+  "plan": {
+    "edges": [
+      {
+        "from": "START",
+        "route": null,
+        "to": "a2a_start"
+      },
+      {
+        "from": "a2a_start",
+        "route": null,
+        "to": "n_transform_3"
+      },
+      {
+        "from": "n_mcp_tool_4",
+        "route": null,
+        "to": "n_transform_2"
+      },
+      {
+        "from": "n_transform_2",
+        "route": null,
+        "to": "n_end_1"
+      },
+      {
+        "from": "n_transform_3",
+        "route": null,
+        "to": "n_mcp_tool_4"
+      }
+    ],
+    "entry_node": "a2a_start",
+    "env_keys": [
+      {
+        "default": "8080",
+        "description": "Port the agent listens on.",
+        "key": "PORT",
+        "needed_by": [
+          "serving"
+        ],
+        "required": false
+      },
+      {
+        "default": "mcp_tool",
+        "description": "Advertised agent name.",
+        "key": "AGENT_NAME",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "description": "Advertised description.",
+        "key": "AGENT_DESCRIPTION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "1.0.0",
+        "description": "Advertised version.",
+        "key": "AGENT_VERSION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "",
+        "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost.",
+        "key": "CLOUD_RUN_URL",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": false
+      },
+      {
+        "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+        "key": "A2A_AUTH_TOKEN",
+        "needed_by": [
+          "inbound_auth"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+        "key": "TASK_STORE_DSN",
+        "needed_by": [
+          "task_persistence"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "MCP server URL for 'Price Quote'.",
+        "key": "MCP_PRICE_QUOTE_URL",
+        "needed_by": [
+          "n_mcp_tool_4"
+        ],
+        "required": true,
+        "secret": true
+      },
+      {
+        "description": "Bearer token for 'Price Quote', if it needs one.",
+        "key": "MCP_PRICE_QUOTE_TOKEN",
+        "needed_by": [
+          "n_mcp_tool_4"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "default": "streamable_http",
+        "description": "MCP transport for every configured server.",
+        "key": "MCP_TRANSPORT",
+        "needed_by": [
+          "n_mcp_tool_4"
+        ],
+        "required": false
+      }
+    ],
+    "join_nodes": [],
+    "nodes": [
+      {
+        "canvas_id": "trigger",
+        "config": {
+          "input_mode": "json",
+          "output_variable": "order",
+          "payload_schema": {
+            "fields": [
+              {
+                "description": "What was ordered",
+                "name": "item",
+                "required": true,
+                "type": "string"
+              },
+              {
+                "description": "How many",
+                "name": "count",
+                "required": true,
+                "type": "integer"
+              }
+            ]
+          },
+          "state_key": "wf"
+        },
+        "is_entry": true,
+        "module": "nodes.a2a_start",
+        "name": "a2a_start",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Order",
+        "type": "A2A_START"
+      },
+      {
+        "canvas_id": "done",
+        "config": {
+          "output_mapping": {}
+        },
+        "is_terminal": true,
+        "module": "nodes.n_end_1",
+        "name": "n_end_1",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Done",
+        "type": "END"
+      },
+      {
+        "canvas_id": "quote",
+        "config": {
+          "_env": {
+            "auth_token": "MCP_PRICE_QUOTE_TOKEN",
+            "mcp_url": "MCP_PRICE_QUOTE_URL"
+          },
+          "arg_fields": [
+            {
+              "name": "sku",
+              "required": true,
+              "source": "data.code",
+              "type": "string"
+            },
+            {
+              "name": "quantity",
+              "required": true,
+              "source": "data.units",
+              "type": "integer"
+            },
+            {
+              "default": "GBP",
+              "name": "currency",
+              "type": "string"
+            }
+          ],
+          "arg_mode": "fields",
+          "output_variable": "quote",
+          "tool_description": "Quote a price for a SKU and quantity.",
+          "tool_name": "price_quote",
+          "tool_schema": {
+            "properties": {
+              "currency": {
+                "type": "string"
+              },
+              "quantity": {
+                "type": "integer"
+              },
+              "sku": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sku",
+              "quantity"
+            ],
+            "type": "object"
+          }
+        },
+        "module": "nodes.n_mcp_tool_4",
+        "name": "n_mcp_tool_4",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Price Quote",
+        "type": "MCP_TOOL"
+      },
+      {
+        "canvas_id": "invoice",
+        "config": {
+          "mode": "fields",
+          "output_fields": [
+            {
+              "name": "description",
+              "required": true,
+              "source": "data.sku",
+              "type": "string"
+            },
+            {
+              "name": "quantity",
+              "required": true,
+              "source": "data.quantity",
+              "type": "integer"
+            },
+            {
+              "name": "amount",
+              "required": true,
+              "source": "data.total",
+              "type": "number"
+            },
+            {
+              "name": "currency",
+              "source": "data.currency",
+              "type": "string"
+            },
+            {
+              "name": "ordered_as",
+              "source": "vars.order.item",
+              "type": "string"
+            }
+          ]
+        },
+        "module": "nodes.n_transform_2",
+        "name": "n_transform_2",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Invoice Line",
+        "type": "TRANSFORM"
+      },
+      {
+        "canvas_id": "normalise",
+        "config": {
+          "mode": "fields",
+          "output_fields": [
+            {
+              "name": "code",
+              "required": true,
+              "source": "data.item",
+              "type": "string"
+            },
+            {
+              "name": "units",
+              "required": true,
+              "source": "data.count",
+              "type": "integer"
+            }
+          ],
+          "output_variable": "normalised"
+        },
+        "module": "nodes.n_transform_3",
+        "name": "n_transform_3",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 60,
+        "title": "Normalise",
+        "type": "TRANSFORM"
+      }
+    ],
+    "schema_version": 1,
+    "terminal_node": "n_end_1",
+    "workflow": {
+      "canvas_version": 2,
+      "description": "Seed workflow: mcp_tool",
+      "name": "mcp_tool",
+      "slug": "mcp_tool",
+      "version_id": "golden-version-id"
+    }
+  },
+  "warnings": []
+}

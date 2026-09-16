@@ -2,7 +2,7 @@ from app.nodes.base import NodeDefinition
 from app.nodes.triggers import A2aStartNode
 from app.nodes.tasks import (
     AgentNode, OrchestratorAgentNode, RemoteAgentNode, FunctionNode,
-    LlmAgentNode, ToolNode, ConditionNode, LoopNode,
+    LlmAgentNode, ToolNode, McpToolNode, ConditionNode, LoopNode,
     TransformNode, EndNode, DataSourceNode, HumanApprovalNode,
     SubworkflowNode, ParallelForkNode, MergeNode, HumanInputNode, WaitNode,
     SequentialAgentNode, ParallelAgentNode,
@@ -53,6 +53,8 @@ _register(RemoteAgentNode())
 _register(FunctionNode())
 _register(LlmAgentNode())
 _register(ToolNode())
+# A direct call in the flow, as opposed to ToolNode, which an agent may call.
+_register(McpToolNode())
 _register(ConditionNode())
 _register(LoopNode())
 _register(TransformNode())

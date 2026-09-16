@@ -24,6 +24,8 @@ from google.adk import Event
 from google.adk.agents.context import Context
 from google.adk.workflow import JoinNode
 
+from core.progress import emit as emit_progress
+
 
 class MergeNode(JoinNode):
     """A JoinNode that combines its branches' outputs into one payload."""
@@ -55,6 +57,10 @@ class MergeNode(JoinNode):
     async def _run_impl(
         self, *, ctx: Context, node_input: Any
     ) -> AsyncGenerator[Any, None]:
+        # A merge is a class, not a `flow_node`-wrapped function, so it reports
+        # itself -- otherwise it is the one node on the canvas that never shows
+        # as running while every branch around it does.
+        emit_progress("start", self.name)
         yield Event(
             output=self._combine(node_input),
             branch=ctx._invocation_context.branch,

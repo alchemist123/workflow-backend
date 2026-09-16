@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,13 @@ logger = logging.getLogger(__name__)
 
 # A test run has to finish while someone is watching it.
 DEFAULT_TIMEOUT = 180.0
+
+# Marks a progress line on the package's stderr. Mirrors core/progress.py in
+# the template; a test asserts the two agree.
+PROGRESS_PREFIX = "@@PROGRESS "
+
+# Called once per node event while the run is still going.
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass
@@ -91,6 +99,23 @@ class RunResult:
         }
 
 
+def _template_matches(package_dir: Path) -> bool:
+    """Whether this package was rendered by the template running now.
+
+    The plan alone cannot tell: a template change leaves every plan identical,
+    so without this a fix to the generated code would reach new workflows and
+    silently skip every package already on disk — the failure mode being a
+    feature that simply does nothing, with no error to chase.
+    """
+    from app.packaging.render import FINGERPRINT_FILE, template_fingerprint
+
+    stamp = package_dir / FINGERPRINT_FILE
+    try:
+        return stamp.read_text().strip() == template_fingerprint()
+    except OSError:
+        return False  # rendered before packages were stamped
+
+
 def ensure_package(plan: GraphPlan, *, rebuild: bool = False) -> tuple[Path, list[str]]:
     """The package directory for this workflow version, rendering it if needed.
 
@@ -110,7 +135,7 @@ def ensure_package(plan: GraphPlan, *, rebuild: bool = False) -> tuple[Path, lis
         # that kept the same version id would otherwise test stale code.
         try:
             existing = json.loads((candidate / "graph.json").read_text())
-            if existing == plan.to_dict():
+            if existing == plan.to_dict() and _template_matches(candidate):
                 logger.info("reusing rendered package at %s", candidate)
                 return candidate, []
         except (OSError, ValueError):
@@ -134,6 +159,7 @@ async def run_workflow_package(
     timeout: float = DEFAULT_TIMEOUT,
     rebuild: bool = False,
     answer: dict[str, Any] | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> RunResult:
     """Render (or reuse) the package and drive it once. Never raises.
 
@@ -158,8 +184,45 @@ async def run_workflow_package(
             error=f"The workflow package could not be built: {exc}",
         )
 
-    envelope = await _invoke(package_dir, payload, mode, timeout, answer)
+    envelope = await _invoke(
+        package_dir, payload, mode, timeout, answer, _with_canvas_ids(plan, on_progress)
+    )
     return _to_result(envelope, plan, package_dir, mode, warnings)
+
+
+async def lookup_task(
+    plan: GraphPlan, *, task_id: str, timeout: float = 60.0
+) -> RunResult:
+    """Look one A2A task up by id. Never raises, and changes nothing.
+
+    A plain `tasks/get` against the package, which answers because the task
+    store lives on disk beside it rather than in the process that created the
+    task. So this reads a task from an earlier test run, or one a real caller
+    submitted to the deployed agent while sharing the same store.
+
+    Read-only: a run parked on a human node stays parked. Answering it is
+    `resume_workflow_package`.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        package_dir, warnings = await loop.run_in_executor(
+            None, lambda: ensure_package(plan)
+        )
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        logger.exception("could not locate the package for %s", plan.workflow_name)
+        return RunResult(
+            ok=False,
+            state="failed",
+            mode="lookup",
+            error=f"The workflow package could not be built: {exc}",
+        )
+
+    envelope = await _run_command(
+        [sys.executable, "run_once.py", "--task", task_id, "--json"],
+        package_dir,
+        timeout,
+    )
+    return _to_result(envelope, plan, package_dir, "lookup", warnings)
 
 
 async def resume_workflow_package(
@@ -170,6 +233,7 @@ async def resume_workflow_package(
     interrupt_id: str,
     response: dict[str, Any],
     timeout: float = DEFAULT_TIMEOUT,
+    on_progress: ProgressCallback | None = None,
 ) -> RunResult:
     """Answer a parked task and let the workflow carry on. Never raises.
 
@@ -206,7 +270,9 @@ async def resume_workflow_package(
     if context_id:
         command += ["--context", context_id]
 
-    envelope = await _run_command(command, package_dir, timeout)
+    envelope = await _run_command(
+        command, package_dir, timeout, _with_canvas_ids(plan, on_progress)
+    )
     return _to_result(envelope, plan, package_dir, "message", warnings)
 
 
@@ -264,6 +330,7 @@ async def _invoke(
     mode: str,
     timeout: float,
     answer: dict[str, Any] | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Run the package's run_once.py and parse its JSON envelope."""
     command = [
@@ -279,11 +346,66 @@ async def _invoke(
     if answer is not None:
         command += ["--answer", json.dumps(answer)]
 
-    return await _run_command(command, package_dir, timeout)
+    return await _run_command(command, package_dir, timeout, on_progress)
+
+
+def _with_canvas_ids(
+    plan: GraphPlan, on_progress: ProgressCallback | None
+) -> ProgressCallback | None:
+    """Name every step by its canvas node, not just the ones that come with one.
+
+    A `start` comes from the node wrapper, which knows only the generated name;
+    an `end` comes from the runner's event, which the package can already map.
+    Filling the gap here means a subscriber sees one identity throughout —
+    otherwise a node would go "running" under `n_transform_3` and "success"
+    under its canvas id, and light up twice on the canvas.
+    """
+    if on_progress is None:
+        return None
+    canvas_ids = plan.canvas_ids
+
+    def enriched(step: dict[str, Any]) -> None:
+        if not step.get("canvas_id"):
+            step = {**step, "canvas_id": canvas_ids.get(step.get("node") or "")}
+        on_progress(step)
+
+    return enriched
+
+
+async def _drain(stream, on_progress: ProgressCallback | None) -> bytes:
+    """Read stderr to the end, handing progress lines over as they arrive.
+
+    `communicate()` would give the same bytes, but only once the process has
+    exited — which is exactly too late for a caller painting the run live. The
+    lines are still returned in full so the error path is unchanged.
+    """
+    chunks: list[bytes] = []
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        chunks.append(line)
+        if on_progress is None:
+            continue
+        text = line.decode("utf-8", "replace")
+        if not text.startswith(PROGRESS_PREFIX):
+            continue
+        try:
+            step = json.loads(text[len(PROGRESS_PREFIX):])
+        except ValueError:
+            continue  # a torn line is not worth failing a run over
+        try:
+            on_progress(step)
+        except Exception:  # noqa: BLE001 - a subscriber must not break the run
+            logger.exception("progress callback failed")
+    return b"".join(chunks)
 
 
 async def _run_command(
-    command: list[str], package_dir: Path, timeout: float
+    command: list[str],
+    package_dir: Path,
+    timeout: float,
+    on_progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Run one run_once.py invocation and parse its JSON envelope."""
     try:
@@ -299,13 +421,22 @@ async def _run_command(
                 # The package logs per node; keep it out of the platform's log
                 # unless something goes wrong.
                 "LOG_LEVEL": "WARNING",
+                # Per-node progress on stderr, only when someone is listening.
+                "WORKFLOW_PROGRESS": "1" if on_progress else "0",
             },
         )
     except OSError as exc:
         return {"_runner_error": f"Could not start the workflow package: {exc}"}
 
+    async def collect() -> tuple[bytes, bytes]:
+        out, err = await asyncio.gather(
+            process.stdout.read(), _drain(process.stderr, on_progress)
+        )
+        await process.wait()
+        return out, err
+
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout + 30)
+        stdout, stderr = await asyncio.wait_for(collect(), timeout=timeout + 30)
     except asyncio.TimeoutError:
         process.kill()
         await process.wait()

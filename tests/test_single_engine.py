@@ -110,10 +110,12 @@ def test_execute_endpoint_is_gone_and_test_replaces_it():
         "/execute is back; /test drives the generated package instead"
     )
 
-    # Actions on a version: exactly one runs the workflow, and it is the one
-    # that drives the generated package.
+    # Actions on a version: exactly one *runs* the workflow, and it is the one
+    # that drives the generated package. `package` builds one; `task` reads a
+    # task back out of one with `tasks/get` and runs nothing.
     actions = {p.rsplit("/", 1)[-1] for p in paths if "/versions/{version_id}/" in p}
-    assert actions == {"test", "package"}, sorted(actions)
+    assert actions == {"test", "package", "task"}, sorted(actions)
+    assert actions & {"execute", "run", "invoke"} == set(), sorted(actions)
 
 
 def test_run_history_endpoints_survive():

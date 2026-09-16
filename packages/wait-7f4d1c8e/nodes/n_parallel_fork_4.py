@@ -1,0 +1,33 @@
+"""PARALLEL_FORK — Split.
+
+Generated from canvas node 'fork'. Do not edit by hand:
+re-package from the platform after changing the canvas.
+"""
+
+from __future__ import annotations
+
+from google.adk import Event
+from google.adk.agents.context import Context
+
+from core.logging import node_logger
+from nodes.base import NODE_KWARGS, flow_node
+
+NODE_ID = "n_parallel_fork_4"
+
+# Branch labels from the canvas. ADK fans out along every plain outgoing edge,
+# so these are documentation rather than routing values -- this node does not
+# return Event(route=...).
+BRANCHES: list[str] = ['poll', 'notify']
+
+log = node_logger(NODE_ID)
+
+
+# No `variable=`: a fork hands each branch the payload it was given, so there
+# is nothing of its own to name.
+@flow_node(name=NODE_ID, **NODE_KWARGS(timeout=120))
+async def n_parallel_fork_4(ctx: Context, node_input=None):
+    log.info("fanning out to %d branch(es)", len(BRANCHES))
+    # Every branch receives this node's output unchanged; they reconverge on a
+    # MERGE node, which is required -- a fork whose branches each end somewhere
+    # different produces several terminal outputs and ADK rejects the run.
+    return Event(output=node_input or {})
