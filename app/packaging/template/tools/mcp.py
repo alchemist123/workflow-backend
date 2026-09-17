@@ -135,7 +135,15 @@ def _make_tool(server: dict[str, Any], tool: Any, url: str, headers: dict | None
     call_mcp_tool.__name__ = safe_tool_name(server.get("name", "mcp"), tool_name)
     call_mcp_tool.__doc__ = description
     apply_schema_signature(call_mcp_tool, input_schema, fallback_param="request")
-    return FunctionTool(call_mcp_tool)
+
+    # `require_confirmation` is what lets an MCP tool put a human in the loop.
+    # ADK turns the pending call into an `adk_request_confirmation` long-running
+    # function call, which the A2A layer reports as `input-required` -- the same
+    # state a HUMAN_APPROVAL node parks on, answered the same way. The MCP
+    # request is not sent until someone approves it.
+    return FunctionTool(
+        call_mcp_tool, require_confirmation=bool(server.get("require_confirmation"))
+    )
 
 
 def unwrap_result(result: Any) -> dict:

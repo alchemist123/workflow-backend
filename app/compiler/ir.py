@@ -192,7 +192,7 @@ def _tool_entry(
         return _agent_entry(src, tool_provision or {}, seen or set())
 
     if src.type in ("TOOL", "DATASOURCE"):
-        return {
+        entry = {
             "kind": "mcp",
             "name": src.metadata.title or src.id,
             "url": src.config.get("mcp_url", ""),
@@ -202,6 +202,14 @@ def _tool_entry(
             "node_id": src.id,
             "node_type": src.type,
         }
+        # A tool an agent may call on its own initiative is exactly where a
+        # human gate belongs: the model picks the moment, a person approves it.
+        # ADK parks the whole A2A task at `input-required` until then. Only set
+        # when on, so an ordinary tool entry is unchanged.
+        if src.config.get("require_confirmation"):
+            entry["require_confirmation"] = True
+        return entry
+
     if src.type == "REMOTE_AGENT":
         return {
             "kind": "a2a",

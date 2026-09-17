@@ -399,6 +399,74 @@ disagree.
 | `REMOTE_AGENT` | Calls another AI agent via the A2A protocol. Looks like just another tool to the orchestrator. |
 | `FUNCTION` | Inline Python code you write directly in the config panel. |
 
+### An MCP tool behind a human gate
+
+There are two kinds of human-in-the-loop here, and they answer different
+questions.
+
+| | HUMAN_APPROVAL node | `require_confirmation` on a TOOL |
+|---|---|---|
+| What it is | a **step you place** | a **guard on a capability** |
+| When it fires | always, at a point you chose | whenever the model tries to use that tool |
+| Who picks the moment | you, on the canvas | the agent |
+
+The second is the only way to gate a tool an agent calls on its own
+initiative, and it is one checkbox — *Ask a human first* on a TOOL node. Both
+park the A2A task at `input-required`, so both are answered exactly the same
+way.
+
+What happens, measured end to end against a real MCP server:
+
+1. the agent decides to call the tool;
+2. the task parks at `input-required`, carrying an `adk_request_confirmation`
+   function call whose `originalFunctionCall` names the call and its arguments
+   — `price_quote(sku="WIDGET", quantity=2)`, not merely "something needs
+   approval";
+3. **approve** → the MCP request goes out and its result comes back
+   (`total: 50.0`);
+4. **reject** → the model is told `{"error": "This tool call is rejected."}`
+   and the MCP server is never contacted.
+
+Two things had to change for this to work, and both are worth knowing:
+
+**The agent node now runs its agent inside the workflow, not beside it.** It
+used to build a nested `Runner` with a fresh `InMemorySessionService`, consume
+the events, and keep only `is_final_response()` text. The confirmation request
+was produced and then dropped — so the task completed *as though the human had
+approved*, without ever asking. And even had it propagated, the throwaway
+session left nothing to resume into. It now uses `ctx.run_node(agent, …)`, so
+the agent is a child run of the graph node, in the workflow's own session,
+which is on disk. As a bonus the agent can now see the same state as the rest
+of the graph.
+
+**A node that calls `ctx.run_node` must be `rerun_on_resume=True`.** ADK
+refuses otherwise, and says why: *"dynamically scheduled nodes might be
+interrupted, and the workflow wakes-up/re-runs the parent node, so it can get
+the child node response."* Without it the run dies with `DynamicNodeFailError`
+the first time a tool asks for confirmation. `_DYNAMIC_PARENT_TYPES` in
+`render.py` sets it for the agent node types.
+
+`test-agents/workflows/seed_mcp_human_gate.py` is the flow;
+`backend/tests/test_mcp_human_gate.py` drives the real generated package
+against the real demo MCP server, with only the model scripted.
+
+#### What about MCP elicitation?
+
+MCP has its own way for a *server* to ask the user mid-call —
+`elicitation/create`. It is a different shape and does not bridge to A2A for
+free. Measured: an eliciting tool against a client with no
+`elicitation_callback` **hangs forever**; with a callback and a stateful server
+it works, returning in-band; with `stateless_http=True` it times out even with
+a callback. The reason is that elicitation is *in-band* — the server blocks on
+an open session waiting for the reply — while A2A `input-required` is
+*out-of-band*: the task parks, the process may exit, and a later call resumes
+it from disk. Bridging them means holding an MCP socket open for the whole
+human response time, which cannot be persisted and so only works inside one
+long-lived instance. Confirmation, above, gets the same outcome by asking
+*before* the request is sent.
+
+---
+
 ### Calling an MCP tool directly
 
 `MCP_TOOL` calls one named tool on one MCP server, as an ordinary step: every

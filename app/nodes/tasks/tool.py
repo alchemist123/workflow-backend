@@ -47,6 +47,15 @@ class ToolNode(NodeDefinition):
                     "type": "object",
                     "description": "Optional HTTP auth headers",
                 },
+                "require_confirmation": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Ask a human before the agent may run this tool. The "
+                        "run parks at A2A `input-required` with the call it "
+                        "wants to make, and only proceeds once approved."
+                    ),
+                },
             },
             "required": ["mcp_url", "tool_name"],
         }

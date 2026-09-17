@@ -1,0 +1,252 @@
+{
+  "plan": {
+    "edges": [
+      {
+        "from": "START",
+        "route": null,
+        "to": "a2a_start"
+      },
+      {
+        "from": "a2a_start",
+        "route": null,
+        "to": "n_orchestrator_agent_1"
+      },
+      {
+        "from": "n_orchestrator_agent_1",
+        "route": null,
+        "to": "n_end_2"
+      }
+    ],
+    "entry_node": "a2a_start",
+    "env_keys": [
+      {
+        "default": "8080",
+        "description": "Port the agent listens on.",
+        "key": "PORT",
+        "needed_by": [
+          "serving"
+        ],
+        "required": false
+      },
+      {
+        "default": "mcp_human_gate",
+        "description": "Advertised agent name.",
+        "key": "AGENT_NAME",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "description": "Advertised description.",
+        "key": "AGENT_DESCRIPTION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "1.0.0",
+        "description": "Advertised version.",
+        "key": "AGENT_VERSION",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": true
+      },
+      {
+        "default": "",
+        "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost.",
+        "key": "CLOUD_RUN_URL",
+        "needed_by": [
+          "agent_card"
+        ],
+        "required": false
+      },
+      {
+        "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+        "key": "A2A_AUTH_TOKEN",
+        "needed_by": [
+          "inbound_auth"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+        "key": "TASK_STORE_DSN",
+        "needed_by": [
+          "task_persistence"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "default": "",
+        "description": "GCP project for Vertex AI.",
+        "key": "GOOGLE_CLOUD_PROJECT",
+        "needed_by": [
+          "n_orchestrator_agent_1"
+        ],
+        "required": true
+      },
+      {
+        "default": "us-central1",
+        "description": "Vertex AI region.",
+        "key": "VERTEX_AI_LOCATION",
+        "needed_by": [
+          "n_orchestrator_agent_1"
+        ],
+        "required": false
+      },
+      {
+        "default": "gemini-2.5-flash",
+        "description": "Default model.",
+        "key": "LLM_MODEL",
+        "needed_by": [
+          "n_orchestrator_agent_1"
+        ],
+        "required": false
+      },
+      {
+        "default": "TRUE",
+        "description": "TRUE routes through Vertex AI; unset uses an AI Studio key.",
+        "key": "GOOGLE_GENAI_USE_VERTEXAI",
+        "needed_by": [
+          "n_orchestrator_agent_1"
+        ],
+        "required": false
+      },
+      {
+        "description": "Service account key as one line. Blank uses Application Default Credentials, which is the usual choice on Cloud Run.",
+        "key": "GOOGLE_SERVICE_ACCOUNT_JSON",
+        "needed_by": [
+          "n_orchestrator_agent_1"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "AI Studio key, as an alternative to Vertex AI for local development.",
+        "key": "GOOGLE_API_KEY",
+        "needed_by": [
+          "n_orchestrator_agent_1"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "description": "MCP server URL for 'Price Quote (needs approval)'.",
+        "key": "MCP_PRICE_QUOTE_NEEDS_APPROVAL_URL",
+        "needed_by": [
+          "n_orchestrator_agent_1"
+        ],
+        "required": true,
+        "secret": true
+      },
+      {
+        "description": "Bearer token for 'Price Quote (needs approval)', if it needs one.",
+        "key": "MCP_PRICE_QUOTE_NEEDS_APPROVAL_TOKEN",
+        "needed_by": [
+          "n_orchestrator_agent_1"
+        ],
+        "required": false,
+        "secret": true
+      },
+      {
+        "default": "streamable_http",
+        "description": "MCP transport for every configured server.",
+        "key": "MCP_TRANSPORT",
+        "needed_by": [
+          "n_orchestrator_agent_1"
+        ],
+        "required": false
+      }
+    ],
+    "join_nodes": [],
+    "nodes": [
+      {
+        "canvas_id": "trigger",
+        "config": {
+          "input_mode": "json",
+          "payload_schema": {
+            "fields": [
+              {
+                "description": "What to ask the agent for",
+                "name": "request",
+                "required": true,
+                "type": "string"
+              }
+            ]
+          },
+          "state_key": "wf"
+        },
+        "is_entry": true,
+        "module": "nodes.a2a_start",
+        "name": "a2a_start",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Request",
+        "type": "A2A_START"
+      },
+      {
+        "canvas_id": "done",
+        "config": {
+          "output_mapping": {}
+        },
+        "is_terminal": true,
+        "module": "nodes.n_end_2",
+        "name": "n_end_2",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Done",
+        "type": "END"
+      },
+      {
+        "canvas_id": "agent",
+        "config": {
+          "instruction": "You quote prices. Use the price quote tool when asked for a price. Report exactly what it returns.",
+          "model": "gemini-2.0-flash",
+          "resolved_tools": {
+            "a2a_agents": [],
+            "agents": [],
+            "functions": [],
+            "groups": [],
+            "mcp_servers": [
+              {
+                "auth_token_env": "MCP_PRICE_QUOTE_NEEDS_APPROVAL_TOKEN",
+                "kind": "mcp",
+                "name": "Price Quote (needs approval)",
+                "node_id": "quote_tool",
+                "node_type": "TOOL",
+                "require_confirmation": true,
+                "tool_name": "price_quote",
+                "transport": "http",
+                "url_env": "MCP_PRICE_QUOTE_NEEDS_APPROVAL_URL"
+              }
+            ]
+          }
+        },
+        "module": "nodes.n_orchestrator_agent_1",
+        "name": "n_orchestrator_agent_1",
+        "on_error": "fail",
+        "retries": 1,
+        "timeout": 120,
+        "title": "Buyer Agent",
+        "type": "ORCHESTRATOR_AGENT"
+      }
+    ],
+    "schema_version": 1,
+    "terminal_node": "n_end_2",
+    "workflow": {
+      "canvas_version": 2,
+      "description": "Seed workflow: mcp_human_gate",
+      "name": "mcp_human_gate",
+      "slug": "mcp_human_gate",
+      "version_id": "golden-version-id"
+    }
+  },
+  "warnings": []
+}

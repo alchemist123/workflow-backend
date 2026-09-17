@@ -144,41 +144,65 @@ async def _build_agent():
     return LlmAgent(**kwargs)
 
 
-async def _run(payload: dict) -> str:
-    """Run the agent over the payload and return its final text."""
-    import uuid
+async def _run(ctx: Context, payload: dict) -> str:
+    """Run the agent as a child of this graph node, and return its final text.
 
-    from google.adk import Runner
-    from google.adk.sessions import InMemorySessionService
-    from google.genai import types
+    `ctx.run_node` rather than a nested `Runner`: the agent becomes a child run
+    of this node, inside the workflow's own session and invocation. That is not
+    a tidiness point, it is what makes three things work.
 
+    * **Human-in-the-loop.** A tool the agent calls can require confirmation
+      (`require_confirmation` on a TOOL node). ADK turns that into an
+      interrupt, and an interrupt only reaches the A2A layer -- as
+      `input-required` -- if it is raised inside the workflow's own run. The
+      old nested `Runner` produced the confirmation event and then dropped it,
+      because this function kept only `is_final_response()` text: the task
+      completed as though the human had approved, without ever asking.
+    * **Resume.** The nested runner used a throwaway `InMemorySessionService`,
+      so even a propagated interrupt had nothing to resume into. The
+      workflow's session is on disk, so an approval arriving in a later
+      process carries on from the paused tool call.
+    * **State.** The agent now sees the same session state as the rest of the
+      graph, so named variables are readable from inside it.
+    """
     global _agent
     if _agent is None:
         _agent = await _build_agent()
 
-    sessions = InMemorySessionService()
-    session_id = str(uuid.uuid4())
-    app_name = f"{settings.AGENT_NAME}_{NODE_ID}"
-    await sessions.create_session(app_name=app_name, user_id="workflow", session_id=session_id)
-    runner = Runner(app_name=app_name, agent=_agent, session_service=sessions)
+    from google.genai import types
 
     message = types.Content(role="user", parts=[types.Part(text=as_text(payload))])
-    answer = ""
-    async for event in runner.run_async(
-        user_id="workflow", session_id=session_id, new_message=message
-    ):
-        if event.is_final_response() and event.content:
-            for part in event.content.parts:
-                if part.text:
-                    answer += part.text
-    return answer
+    result = await ctx.run_node(_agent, message)
+
+    # `run_node` hands back whatever the child produced: an Event, content, or
+    # plain text depending on the agent. Reduce it to the text this node's
+    # contract promises.
+    return _as_answer(result)
+
+
+def _as_answer(result: object) -> str:
+    """The agent's reply as text, whatever shape `run_node` returned."""
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        return result
+
+    content = getattr(result, "content", None) or result
+    parts = getattr(content, "parts", None)
+    if parts:
+        return "".join(p.text for p in parts if getattr(p, "text", None))
+
+    output = getattr(result, "output", None)
+    if output is not None:
+        return output if isinstance(output, str) else as_text(output)
+    return as_text(result)
 
 
 @flow_node(name=NODE_ID, variable=OUTPUT_VARIABLE, **NODE_KWARGS({{ node_kwargs }}))
 async def {{ node.name }}(ctx: Context, node_input=None):
     data = node_input or {}
     try:
-        answer = await _run(data)
+        answer = await _run(ctx, data)
     except Exception as exc:  # noqa: BLE001
         if ON_ERROR != "continue":
             raise

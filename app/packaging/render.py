@@ -213,6 +213,15 @@ def _validate_expression(expression: str, canvas_id: str, label: str) -> str:
 # ── Per-node template context ────────────────────────────────────────────────
 
 
+# Node types that run a child node with `ctx.run_node`. ADK requires
+# `rerun_on_resume=True` on any such node, and says why: "dynamically
+# scheduled nodes might be interrupted, and the workflow wakes-up/re-runs the
+# parent node, so it can get the child node response." Without it the run
+# fails outright with DynamicNodeFailError the first time a tool asks for
+# confirmation.
+_DYNAMIC_PARENT_TYPES = frozenset({"ORCHESTRATOR_AGENT", "AGENT"})
+
+
 def _node_kwargs(node: PlannedNode, timeout: int | None = None) -> str:
     """The literal keyword arguments for this node's `@node(...)` decorator.
 
@@ -226,6 +235,8 @@ def _node_kwargs(node: PlannedNode, timeout: int | None = None) -> str:
         parts.append(f"timeout={int(effective)}")
     if node.retries and node.retries > 1:
         parts.append(f"retries={int(node.retries)}")
+    if node.node_type in _DYNAMIC_PARENT_TYPES:
+        parts.append("rerun_on_resume=True")
     return ", ".join(parts)
 
 
