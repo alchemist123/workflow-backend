@@ -108,3 +108,31 @@ def test_seed_a2a_start_declares_a_payload(path):
     schema = payload_json_schema(start["config"])
     assert schema["properties"]
     assert schema.get("required"), "at least one field should be required"
+
+
+@pytest.mark.skipif(not _seed_files(), reason="test-agents/workflows not present")
+@pytest.mark.parametrize("path", _seed_files(), ids=lambda p: p.stem)
+def test_no_seed_pins_itself_to_a_schema_version(path):
+    """A seed that names a version gets migrated on read, and Run goes grey.
+
+    `CanvasPayload.schema_version` defaults to the current one, so omitting it
+    is both simpler and self-maintaining. Seeds that hardcoded a number drifted
+    the moment the schema moved: four were still on 6 and one on 4 after the
+    v7 migration landed, so they seeded, compiled, and then opened in the UI as
+    "migrated — Save & Compile to apply", with Run and Package disabled.
+    """
+    source = path.read_text()
+    assert '"schema_version"' not in source, (
+        f"{path.name} pins a schema version; let the backend stamp it"
+    )
+
+
+@pytest.mark.skipif(not _seed_files(), reason="test-agents/workflows not present")
+@pytest.mark.parametrize("path", _seed_files(), ids=lambda p: p.stem)
+def test_a_seed_opens_without_needing_migration(path):
+    """What the UI actually does on load, which is where the drift showed."""
+    from app.compiler.canvas_migrations import needs_migration
+    from app.schemas.canvas import CanvasPayload
+
+    canvas = CanvasPayload.model_validate(_load_canvas(path))
+    assert not needs_migration(canvas.model_dump())

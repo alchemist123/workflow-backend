@@ -321,7 +321,10 @@ def test_unmerged_duplicate_would_have_been_rejected_by_adk():
 
 def test_plain_duplicate_edges_collapse_to_one():
     nodes, edges = _linear()
-    edges.append(_edge("start", "mid", "error"))  # a second plain edge, same pair
+    # A second plain edge on the same pair. It leaves by `output` as well,
+    # because A2A_START has no other handle -- and since the handle check was
+    # added, inventing one makes this fail for a different reason.
+    edges.append(_edge("start", "mid", "output"))
     plan = _plan(nodes, edges)
 
     pairs = [(e.from_node, e.to_node) for e in plan.edges]

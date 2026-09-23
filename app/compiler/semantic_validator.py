@@ -22,6 +22,8 @@ from typing import Any
 
 import networkx as nx
 
+from app.compiler.connection_rules import can_connect as connection_refusal
+from app.compiler.findings import Findings
 from app.compiler.inputs import available_inputs, input_is_opaque
 from app.nodes.agent_io import structure_errors
 from app.nodes.variables import name_error as variable_name_error
@@ -42,13 +44,27 @@ _BRANCH_NODES = BRANCH_NODE_TYPES
 
 
 
+def _rotate_cycle(cycle: list[str]) -> list[str]:
+    """Start a cycle at its lowest node id.
+
+    `nx.simple_cycles` is free to return the same cycle starting anywhere in
+    it, and does: the identical canvas produced "agent -> shape -> agent" on
+    one run and "shape -> agent -> shape" on the next, depending only on what
+    else had been imported. A message that changes between runs is confusing
+    to read and impossible to pin down in a test.
+    """
+    if not cycle:
+        return cycle
+    start = cycle.index(min(cycle))
+    return cycle[start:] + cycle[:start]
+
+
 def _check_mapping(
     canvas: Any,
     node: Any,
     fields: list[dict],
     what: str,
-    errors: list[str],
-    warnings: list[str],
+    out: Findings,
 ) -> None:
     """Check a canvas field mapping against what is actually readable here.
 
@@ -66,19 +82,18 @@ def _check_mapping(
         name = (field.get("name") or "").strip()
         label = name or f"{what} {index + 1}"
         if not name:
-            errors.append(f"Node '{node.id}' ({node.type}) has an {what} with no name.")
+            out.error(f"Node '{node.id}' ({node.type}) has an {what} with no name.", node=node)
         elif name in seen_names:
-            errors.append(f"Node '{node.id}' ({node.type}) builds '{name}' twice.")
+            out.error(f"Node '{node.id}' ({node.type}) builds '{name}' twice.", node=node)
         seen_names.add(name)
 
         source = (field.get("source") or "").strip()
         if not source:
             if "default" in field and field["default"] is not None:
                 continue  # a constant, not a mapping
-            errors.append(
+            out.error(
                 f"Node '{node.id}' ({node.type}): '{label}' has no source. "
-                "Pick where its value comes from, or give it a default."
-            )
+                "Pick where its value comes from, or give it a default.", node=node)
             continue
 
         match = known.get(source) or known.get(f"data.{source}")
@@ -87,33 +102,28 @@ def _check_mapping(
             # -- the lookup just goes deeper at runtime.
             prefix_known = any(source.startswith(f"{path}.") for path in known)
             if prefix_known or opaque:
-                warnings.append(
+                out.warn(
                     f"Node '{node.id}' ({node.type}): '{label}' reads "
                     f"'{source}', which the canvas cannot confirm is present. "
-                    "It will be skipped at runtime if absent."
-                )
+                    "It will be skipped at runtime if absent.", node=node)
             else:
                 available = ", ".join(sorted(known)[:6]) or "nothing declared upstream"
-                errors.append(
+                out.error(
                     f"Node '{node.id}' ({node.type}): '{label}' reads "
                     f"'{source}', which nothing upstream produces. "
-                    f"Available here: {available}."
-                )
+                    f"Available here: {available}.", node=node)
             continue
 
         wanted = field.get("type") or "string"
         if wanted != match.type and match.type != "any" and wanted != "any":
             # Compatible enough to convert, so this is a note not a block.
-            warnings.append(
+            out.warn(
                 f"Node '{node.id}' ({node.type}): '{label}' is declared "
                 f"{wanted} but '{source}' is {match.type}. It will be "
-                "converted, or passed through unchanged if it cannot be."
-            )
+                "converted, or passed through unchanged if it cannot be.", node=node)
 
 
-def _check_mcp_tool(
-    canvas: Any, node: Any, errors: list[str], warnings: list[str]
-) -> None:
+def _check_mcp_tool(canvas: Any, node: Any, out: Findings) -> None:
     """A direct MCP tool call: reachable server, named tool, arguments that fit.
 
     The tool's own input schema is cached on the node when the config panel
@@ -124,15 +134,13 @@ def _check_mcp_tool(
     config = node.config or {}
 
     if not (config.get("mcp_url") or "").strip():
-        errors.append(
+        out.error(
             f"Node '{node.id}' (MCP_TOOL) has no server URL. Enter one and "
-            "fetch the server's tools."
-        )
+            "fetch the server's tools.", node=node)
     if not (config.get("tool_name") or "").strip():
-        errors.append(
+        out.error(
             f"Node '{node.id}' (MCP_TOOL) names no tool. Fetch the server's "
-            "tools and pick one."
-        )
+            "tools and pick one.", node=node)
 
     schema = config.get("tool_schema") or {}
     declared = {(p or "").strip() for p in (schema.get("properties") or {})}
@@ -143,38 +151,46 @@ def _check_mcp_tool(
         # earlier node -- fine for a permissive server, a schema error on a
         # strict one.
         if declared:
-            warnings.append(
+            out.warn(
                 f"Node '{node.id}' (MCP_TOOL) sends the whole payload as "
                 f"arguments, but '{config.get('tool_name')}' declares "
                 f"{len(declared)}. A server that validates its input strictly "
-                "will reject the extra keys; map the arguments instead."
-            )
+                "will reject the extra keys; map the arguments instead.", node=node)
         return
 
     fields = config.get("arg_fields") or []
-    _check_mapping(canvas, node, fields, "argument", errors, warnings)
+    _check_mapping(canvas, node, fields, "argument", out)
 
     mapped = {(f.get("name") or "").strip() for f in fields}
     mapped.discard("")
 
     for missing in sorted(required - mapped):
-        errors.append(
+        out.error(
             f"Node '{node.id}' (MCP_TOOL): '{config.get('tool_name')}' requires "
-            f"the argument '{missing}', which is not mapped."
-        )
+            f"the argument '{missing}', which is not mapped.", node=node)
 
     for extra in sorted(mapped - declared) if declared else []:
-        warnings.append(
+        out.warn(
             f"Node '{node.id}' (MCP_TOOL) sends '{extra}', which "
             f"'{config.get('tool_name')}' does not declare. Re-fetch the "
-            "server's tools if it has changed."
-        )
+            "server's tools if it has changed.", node=node)
 
 
 def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
-    """Returns (errors, warnings). Errors block compilation; warnings do not."""
-    errors: list[str] = []
-    warnings: list[str] = []
+    """Returns (errors, warnings). Errors block compilation; warnings do not.
+
+    Unchanged on purpose: eleven test files assert on substrings of these
+    strings and the compile log shows them verbatim. `collect_findings` is the
+    same work with the node or edge each result concerns attached, for a canvas
+    that wants to mark the thing rather than print a list.
+    """
+    out = collect_findings(canvas)
+    return out.as_strings({n.id: n.type for n in canvas.nodes})
+
+
+def collect_findings(canvas: CanvasPayload) -> Findings:
+    """Every validation result, each anchored to what it is about."""
+    out = Findings()
     nodes = {n.id: n for n in canvas.nodes}
     node_ids = set(nodes)
 
@@ -185,16 +201,31 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
     # ── Edge endpoints must exist ────────────────────────────────────────────
     for edge in canvas.edges:
         if edge.source not in node_ids:
-            errors.append(
-                f"Edge '{edge.id}': source node '{edge.source}' does not exist"
-            )
+            out.error(
+                f"Edge '{edge.id}': source node '{edge.source}' does not exist", edge=edge)
         if edge.target not in node_ids:
-            errors.append(
-                f"Edge '{edge.id}': target node '{edge.target}' does not exist"
-            )
-    if errors:
+            out.error(
+                f"Edge '{edge.id}': target node '{edge.target}' does not exist", edge=edge)
+    if out.has_errors:
         # Every rule below reads the graph; bail out rather than report noise.
-        return errors, warnings
+        return out
+
+    # ── An edge must leave by a handle the node actually has ─────────────────
+    # Nothing checked this before: `output_handles` was never read anywhere in
+    # the compiler. So an edge leaving a CONDITION by a branch nobody named --
+    # the usual cause being a branch renamed after the edge was drawn -- passed
+    # validation and then simply never fired at run time.
+    for edge in canvas.edges:
+        source = nodes[edge.source]
+        refusal = connection_refusal(
+            source.type,
+            edge.source_handle,
+            nodes[edge.target].type,
+            edge.target_handle,
+            source_config=source.config,
+        )
+        if refusal is not None and refusal.code == "edge.unknown_handle":
+            out.error(f"Node '{edge.source}' ({source.type}): {refusal.message}", node=edge.source)
 
     # Tool-provision edges are not flow: they hang a provider off a consumer's
     # "tools" handle. Keeping them out of `graph` is what lets the flow rules
@@ -214,13 +245,12 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
     # ── Retired trigger types ────────────────────────────────────────────────
     for node in canvas.nodes:
         if node.type in RETIRED_TRIGGER_TYPES:
-            errors.append(
+            out.error(
                 f"Node '{node.id}' uses '{node.type}', which no longer exists. "
                 "Workflows now start from a single A2A_START node. Re-open and "
-                "re-save this workflow to migrate it automatically."
-            )
-    if errors:
-        return errors, warnings
+                "re-save this workflow to migrate it automatically.", node=node)
+    if out.has_errors:
+        return out
 
     # ── Exactly one entry node ───────────────────────────────────────────────
     entry_nodes = [
@@ -228,10 +258,10 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
         if (defn := get_node_definition(n.type)) and defn.is_trigger
     ]
     if not entry_nodes:
-        errors.append("Workflow must have exactly one A2A_START node (found none)")
+        out.error("Workflow must have exactly one A2A_START node (found none)")
     elif len(entry_nodes) > 1:
         listed = ", ".join(f"'{n.id}'" for n in entry_nodes)
-        errors.append(
+        out.error(
             f"Workflow must have exactly one A2A_START node (found {len(entry_nodes)}: {listed})"
         )
 
@@ -241,13 +271,11 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
         if not defn:
             continue
         if not defn.allows_inbound and graph.in_degree(node.id) > 0:
-            errors.append(
-                f"Node '{node.id}' ({node.type}) is the workflow entry and must not have inbound edges"
-            )
+            out.error(
+                f"Node '{node.id}' ({node.type}) is the workflow entry and must not have inbound edges", node=node)
         if not defn.allows_outbound and graph.out_degree(node.id) > 0:
-            errors.append(
-                f"Node '{node.id}' ({node.type}) is a terminal node and must not have outbound edges"
-            )
+            out.error(
+                f"Node '{node.id}' ({node.type}) is a terminal node and must not have outbound edges", node=node)
 
     # ── Exactly one terminal node ────────────────────────────────────────────
     # ADK requires this, and the generated END node is what makes the A2A task
@@ -257,10 +285,10 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
         if (defn := get_node_definition(n.type)) and defn.is_terminal
     ]
     if not end_nodes:
-        errors.append("Workflow must have exactly one END node (found none)")
+        out.error("Workflow must have exactly one END node (found none)")
     elif len(end_nodes) > 1:
         listed = ", ".join(f"'{n.id}'" for n in end_nodes)
-        errors.append(
+        out.error(
             f"Workflow must have exactly one END node (found {len(end_nodes)}: {listed}). "
             "Route every path to a single END, using a MERGE node to rejoin parallel branches."
         )
@@ -275,11 +303,10 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
             if node.id in tool_only:
                 continue
             if graph.out_degree(node.id) == 0 and graph.in_degree(node.id) > 0:
-                errors.append(
+                out.error(
                     f"Node '{node.id}' ({node.type}) has no outbound edge, so it "
                     "would end the workflow alongside the END node. Connect it "
-                    "onward to the END node."
-                )
+                    "onward to the END node.", node=node)
 
     # ── Parallel branches must reconverge ────────────────────────────────────
     for node in canvas.nodes:
@@ -287,16 +314,14 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
             continue
         out_edges = [e for e in canvas.edges if e.source == node.id]
         if len(out_edges) < 2:
-            errors.append(
-                f"Node '{node.id}' (PARALLEL_FORK) must have at least 2 outbound edges"
-            )
+            out.error(
+                f"Node '{node.id}' (PARALLEL_FORK) must have at least 2 outbound edges", node=node)
             continue
         if not _branches_reconverge(graph, node.id, [e.target for e in out_edges]):
-            errors.append(
+            out.error(
                 f"Node '{node.id}' (PARALLEL_FORK) has branches that never rejoin. "
                 "Every branch must reach a common MERGE node, or the run fails "
-                "with multiple terminal outputs."
-            )
+                "with multiple terminal outputs.", node=node)
 
     # ── Duplicate (source, target) pairs ─────────────────────────────────────
     # ADK rejects two edges sharing a pair even when their handles differ, so
@@ -312,16 +337,14 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
         if len(handles) > 1:
             source_node = nodes[source]
             if source_node.type in _BRANCH_NODES:
-                warnings.append(
+                out.warn(
                     f"Node '{source}' ({source_node.type}) has {len(handles)} edges to "
                     f"'{target}' ({', '.join(handles)}); they will be merged into a "
-                    "single edge carrying all those branches."
-                )
+                    "single edge carrying all those branches.", node=source)
             else:
-                warnings.append(
+                out.warn(
                     f"Duplicate edge from '{source}' to '{target}' "
-                    f"({len(handles)} copies); only one will be kept."
-                )
+                    f"({len(handles)} copies); only one will be kept.", node=source)
 
     # ── Connectivity ─────────────────────────────────────────────────────────
     connected: set[str] = set()
@@ -334,9 +357,8 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
             and len(canvas.nodes) > 1
             and node.id not in tool_only
         ):
-            warnings.append(
-                f"Node '{node.id}' ({node.type}) is not connected to any edge and will be skipped"
-            )
+            out.warn(
+                f"Node '{node.id}' ({node.type}) is not connected to any edge and will be skipped", node=node)
 
     # Every flow node must be reachable from the entry, or it never runs.
     if len(entry_nodes) == 1:
@@ -346,10 +368,9 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
                 continue
             if node.id not in connected:
                 continue  # already reported as orphaned
-            errors.append(
+            out.error(
                 f"Node '{node.id}' ({node.type}) is not reachable from the "
-                f"A2A_START node '{entry_nodes[0].id}' and would never run."
-            )
+                f"A2A_START node '{entry_nodes[0].id}' and would never run.", node=node)
 
     # ── Cycles only through LOOP nodes ───────────────────────────────────────
     try:
@@ -360,8 +381,10 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
                 for n in cycle_nodes
             )
             if not has_loop:
-                errors.append(
-                    f"Cycle detected without a LOOP node: {' -> '.join(cycle)}"
+                out.error(
+                    "Cycle detected without a LOOP node: "
+                    f"{' -> '.join(_rotate_cycle(cycle))}",
+                    related_node_ids=_rotate_cycle(cycle)
                 )
     except Exception:  # noqa: BLE001 - cycle detection is advisory
         pass
@@ -372,17 +395,15 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
     for edge in tool_edges:
         source, target = nodes[edge.source], nodes[edge.target]
         if target.type not in TOOL_CONSUMER_TYPES:
-            errors.append(
+            out.error(
                 f"Node '{edge.target}' ({target.type}) has no tools input, so "
                 f"'{edge.source}' cannot be wired into it as a tool. Tools "
-                f"connect to: {', '.join(sorted(TOOL_CONSUMER_TYPES))}."
-            )
+                f"connect to: {', '.join(sorted(TOOL_CONSUMER_TYPES))}.", node=edge.target)
             continue
         if source.type not in TOOL_PROVIDER_TYPES:
-            errors.append(
+            out.error(
                 f"Node '{edge.source}' ({source.type}) cannot be used as a tool. "
-                f"Only these can: {', '.join(sorted(TOOL_PROVIDER_TYPES))}."
-            )
+                f"Only these can: {', '.join(sorted(TOOL_PROVIDER_TYPES))}.", node=edge.source)
             continue
         children_of.setdefault(edge.target, []).append(edge.source)
 
@@ -397,51 +418,44 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
             if e.source == node.id and e.target_handle != "tools"
         ]
         if flow_targets:
-            errors.append(
+            out.error(
                 f"Node '{node.id}' ({node.type}) is a tool group, so its output "
                 "must connect to the tools input of an agent or another group — "
-                f"not into the workflow flow (currently '{flow_targets[0]}')."
-            )
+                f"not into the workflow flow (currently '{flow_targets[0]}').", node=node)
 
         consumers = [e.target for e in tool_edges if e.source == node.id]
         if not consumers:
-            errors.append(
+            out.error(
                 f"Node '{node.id}' ({node.type}) is not connected to anything. "
-                "Connect its output to the tools input of an agent or another group."
-            )
+                "Connect its output to the tools input of an agent or another group.", node=node)
 
         own_children = children_of.get(node.id, [])
         if not own_children:
-            errors.append(
+            out.error(
                 f"Node '{node.id}' ({node.type}) has no tools connected to it. "
-                "Wire at least one tool, remote agent or function into it."
-            )
+                "Wire at least one tool, remote agent or function into it.", node=node)
         elif len(own_children) < 2:
-            warnings.append(
+            out.warn(
                 f"Node '{node.id}' ({node.type}) has only one tool connected, so "
-                "it will behave the same as connecting that tool directly."
-            )
+                "it will behave the same as connecting that tool directly.", node=node)
 
         # `order` names canvas nodes; a stale id means the user removed a tool
         # and the order was left behind.
         ordered = [str(x) for x in (node.config.get("order") or [])]
         for node_id in ordered:
             if node_id not in own_children:
-                errors.append(
+                out.error(
                     f"Node '{node.id}' ({node.type}) lists '{node_id}' in its "
-                    "execution order, but that node is not connected to it."
-                )
+                    "execution order, but that node is not connected to it.", node=node)
         duplicates = {x for x in ordered if ordered.count(x) > 1}
         for node_id in sorted(duplicates):
-            errors.append(
+            out.error(
                 f"Node '{node.id}' ({node.type}) lists '{node_id}' more than once "
-                "in its execution order."
-            )
+                "in its execution order.", node=node)
         if node.type == "SEQUENTIAL_AGENT" and own_children and not ordered:
-            warnings.append(
+            out.warn(
                 f"Node '{node.id}' (SEQUENTIAL_AGENT) has no execution order set, "
-                "so its tools run in canvas order. Set the order to be explicit."
-            )
+                "so its tools run in canvas order. Set the order to be explicit.", node=node)
 
     # An agent attached to a tools handle is called by another model, so what
     # the caller can see about it decides whether it is usable at all.
@@ -452,18 +466,16 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
             continue  # not used as a tool; it is a flow node
 
         if not (node.config.get("description") or "").strip():
-            warnings.append(
+            out.warn(
                 f"Node '{node.id}' ({node.type}) is used as a tool but has no "
                 "description. The calling model uses it to decide whether to "
-                "pick this agent, so without one it will rarely be called."
-            )
+                "pick this agent, so without one it will rarely be called.", node=node)
 
         if not ((node.config.get("input_structure") or {}).get("fields") or []):
-            warnings.append(
+            out.warn(
                 f"Node '{node.id}' ({node.type}) is used as a tool but declares "
                 "no input structure, so the caller can only pass it one free-text "
-                "request. Add input fields to be called with real arguments."
-            )
+                "request. Add input fields to be called with real arguments.", node=node)
 
     # A cycle in the tool wiring cannot be seen by the flow-graph cycle check,
     # because tool edges are excluded from that graph. Left unchecked it would
@@ -472,11 +484,12 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
     for edge in tool_edges:
         tool_graph.add_edge(edge.source, edge.target)
     try:
-        for cycle in nx.simple_cycles(tool_graph):
-            errors.append(
+        for raw_cycle in nx.simple_cycles(tool_graph):
+            cycle = _rotate_cycle(raw_cycle)
+            out.error(
                 "Tools are wired in a loop: "
                 f"{' -> '.join(cycle)} -> {cycle[0]}. A group or agent cannot "
-                "contain itself."
+                "contain itself.", related_node_ids=cycle
             )
     except Exception:  # noqa: BLE001 - cycle detection is advisory
         pass
@@ -487,9 +500,8 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
 
     for node in canvas.nodes:
         if node.type == "CONDITION" and not node.config.get("branches"):
-            errors.append(
-                f"Node '{node.id}' (CONDITION) must define at least one branch"
-            )
+            out.error(
+                f"Node '{node.id}' (CONDITION) must define at least one branch", node=node)
 
         # A field mapping is checked against what is actually available here:
         # the whole point of declaring the shape is that a source which will
@@ -497,14 +509,13 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
         if node.type == "TRANSFORM" and (node.config.get("mode") or "fields") == "fields":
             declared = node.config.get("output_fields") or []
             if not declared:
-                errors.append(
+                out.error(
                     f"Node '{node.id}' (TRANSFORM) builds no fields. Add at "
-                    "least one output field, or switch to an expression mode."
-                )
-            _check_mapping(canvas, node, declared, "output field", errors, warnings)
+                    "least one output field, or switch to an expression mode.", node=node)
+            _check_mapping(canvas, node, declared, "output field", out)
 
         if node.type == "MCP_TOOL":
-            _check_mcp_tool(canvas, node, errors, warnings)
+            _check_mcp_tool(canvas, node, out)
 
         # A variable name that cannot be bound would simply never appear, so
         # it is caught here rather than discovered in an expression.
@@ -512,13 +523,12 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
         if variable:
             problem = variable_name_error(variable)
             if problem:
-                errors.append(f"Node '{node.id}' ({node.type}): {problem}")
+                out.error(f"Node '{node.id}' ({node.type}): {problem}", node=node)
             elif variable in variable_owners:
-                warnings.append(
+                out.warn(
                     f"Node '{node.id}' ({node.type}) saves to '{variable}', "
                     f"which node '{variable_owners[variable]}' also saves to. "
-                    "Whichever runs last wins."
-                )
+                    "Whichever runs last wins.", node=node)
             else:
                 variable_owners[variable] = node.id
 
@@ -531,23 +541,20 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
 
             seconds = wait_seconds(node.config)
             if seconds <= 0:
-                errors.append(
+                out.error(
                     f"Node '{node.id}' (WAIT) has no duration, so it would not "
-                    "wait at all. Set how long to wait, or remove the node."
-                )
+                    "wait at all. Set how long to wait, or remove the node.", node=node)
             elif seconds > MAX_WAIT_SECONDS:
-                errors.append(
+                out.error(
                     f"Node '{node.id}' (WAIT) would wait {seconds / 60:.0f} "
                     f"minutes, over the {MAX_WAIT_SECONDS // 60}-minute limit. "
                     "A wait that long belongs outside the workflow — have a "
-                    "scheduler start it later instead of holding a run open."
-                )
+                    "scheduler start it later instead of holding a run open.", node=node)
             elif seconds > BLOCKING_COMFORT_SECONDS:
-                warnings.append(
+                out.warn(
                     f"Node '{node.id}' (WAIT) waits {seconds:.0f}s. A blocking "
                     "caller holds its connection open for the whole time, so "
-                    "invoke this workflow in task mode and poll for the result."
-                )
+                    "invoke this workflow in task mode and poll for the result.", node=node)
 
         # An input request with no fields parks the run to ask for nothing,
         # which can only ever be a mistake.
@@ -555,16 +562,14 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
             fields = (node.config.get("collect_fields") or {}).get("fields") or []
             named = [f for f in fields if (f.get("name") or "").strip()]
             if not named:
-                errors.append(
+                out.error(
                     f"Node '{node.id}' (HUMAN_INPUT) collects no fields, so it "
                     "would pause the run to ask for nothing. Add at least one "
-                    "field to collect."
-                )
+                    "field to collect.", node=node)
             if not (node.config.get("prompt") or "").strip():
-                warnings.append(
+                out.warn(
                     f"Node '{node.id}' (HUMAN_INPUT) has no prompt. The paused "
-                    "task will not say why the workflow needs these values."
-                )
+                    "task will not say why the workflow needs these values.", node=node)
 
         # An approval gate with only one branch wired silently drops the other
         # decision: the run would reach a dead end with no route to take.
@@ -576,34 +581,30 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
             }
             for handle in ("approved", "rejected"):
                 if handle not in handles:
-                    errors.append(
+                    out.error(
                         f"Node '{node.id}' (HUMAN_APPROVAL) has nothing on its "
                         f"'{handle}' output, so a {handle} decision would have "
-                        "nowhere to go. Connect both outputs."
-                    )
+                        "nowhere to go. Connect both outputs.", node=node)
             if not (node.config.get("prompt") or "").strip():
-                warnings.append(
+                out.warn(
                     f"Node '{node.id}' (HUMAN_APPROVAL) has no prompt. The "
                     "paused task will just say 'Approve this step?', which "
-                    "tells the approver nothing about what they are approving."
-                )
+                    "tells the approver nothing about what they are approving.", node=node)
 
         # A LOOP with no mode-specific config is the quietest possible failure:
         # it compiles, packages, runs, and iterates zero times.
         if node.type == "LOOP":
             mode = node.config.get("mode") or "for_each"
             if mode == "for_each" and not (node.config.get("items_path") or "").strip():
-                errors.append(
+                out.error(
                     f"Node '{node.id}' (LOOP) is in for_each mode but has no "
                     "items path, so it would never iterate. Set the path to the "
-                    "list, e.g. 'data.items'."
-                )
+                    "list, e.g. 'data.items'.", node=node)
             if mode == "while" and not (node.config.get("exit_condition") or "").strip():
-                errors.append(
+                out.error(
                     f"Node '{node.id}' (LOOP) is in while mode but has no exit "
                     "condition, so it would only stop at max_iterations. Set a "
-                    "condition, e.g. 'i >= 5'."
-                )
+                    "condition, e.g. 'i >= 5'.", node=node)
 
             # The loop needs both handles wired or it is not a loop.
             handles = {
@@ -616,10 +617,9 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
                 ("done", "where to go when the loop finishes"),
             ):
                 if handle not in handles:
-                    errors.append(
+                    out.error(
                         f"Node '{node.id}' (LOOP) has nothing on its "
-                        f"'{handle}' output, which is {purpose}."
-                    )
+                        f"'{handle}' output, which is {purpose}.", node=node)
 
         # Structure field names become pydantic fields and tool parameters, so
         # they have to be usable as Python identifiers and unique.
@@ -628,7 +628,7 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
                 ("input_structure", "input structure"),
                 ("output_structure", "output structure"),
             ):
-                errors.extend(
+                out.extend_errors(
                     f"Node '{node.id}' ({node.type}): {message}"
                     for message in structure_errors(node.config.get(key), label)
                 )
@@ -640,12 +640,11 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
             )
             used_as_tool = any(e.source == node.id for e in tool_edges)
             if has_input_fields and not used_as_tool:
-                warnings.append(
+                out.warn(
                     f"Node '{node.id}' ({node.type}) declares an input structure, "
                     "but it only applies when the agent is called as a tool by "
                     "another agent. Here it runs in the flow, so the structure is "
-                    "ignored; its input comes from the previous node."
-                )
+                    "ignored; its input comes from the previous node.", node=node)
 
         # `on_error: continue` only means something where the generated module
         # emits an error payload instead of raising; elsewhere it would be
@@ -653,34 +652,30 @@ def validate_semantics(canvas: CanvasPayload) -> tuple[list[str], list[str]]:
         if node.policies.on_error == "continue":
             defn = get_node_definition(node.type)
             if defn and not defn.supports_on_error_continue:
-                warnings.append(
+                out.warn(
                     f"Node '{node.id}' ({node.type}) is set to continue on error, "
                     "but that only applies to nodes that call out of the workflow "
                     "(models, tools, remote agents, functions and transforms). "
-                    "This node will fail the run instead."
-                )
+                    "This node will fail the run instead.", node=node)
 
         if node.type == "A2A_START":
             fields = (node.config.get("payload_schema") or {}).get("fields") or []
             names = [(f.get("name") or "").strip() for f in fields]
             for index, name in enumerate(names):
                 if not name:
-                    errors.append(
-                        f"Node '{node.id}' (A2A_START) payload field {index + 1} has no name"
-                    )
+                    out.error(
+                        f"Node '{node.id}' (A2A_START) payload field {index + 1} has no name", node=node)
             duplicates = {n for n in names if n and names.count(n) > 1}
             for name in sorted(duplicates):
-                errors.append(
-                    f"Node '{node.id}' (A2A_START) has more than one payload field named '{name}'"
-                )
+                out.error(
+                    f"Node '{node.id}' (A2A_START) has more than one payload field named '{name}'", node=node)
             if not fields:
-                warnings.append(
+                out.warn(
                     f"Node '{node.id}' (A2A_START) declares no payload fields; "
                     "callers get no documented input contract and the test panel "
-                    "falls back to a raw JSON editor."
-                )
+                    "falls back to a raw JSON editor.", node=node)
 
-    return errors, warnings
+    return out
 
 
 def _branches_reconverge(graph: nx.DiGraph, fork_id: str, branch_starts: list[str]) -> bool:

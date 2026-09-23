@@ -8,12 +8,13 @@ from app.database import get_db
 from app.models.workflow import Workflow, WorkflowVersion, WorkflowExecution, ExecutionStatus, WorkflowStatus
 from app.schemas.workflow import (
     TaskLookupRequest,
+    ValidateRequest,
     AnswerRequest,
     NodeInputsRequest,
     WorkflowCreate, WorkflowUpdate, WorkflowRead, WorkflowVersionRead,
     SaveCanvasRequest, CompileResponse, ExecutionRead, TestRunRequest,
 )
-from app.compiler import run_compiler
+from app.compiler import collect_all_findings, run_compiler
 from app.compiler.canvas_migrations import migrate_canvas, needs_migration
 from app.nodes.registry import get_palette
 
@@ -24,6 +25,22 @@ router = APIRouter(prefix="/workflows", tags=["workflows"])
 async def get_node_palette():
     """Return all registered node types with palette metadata and schemas."""
     return get_palette()
+
+
+@router.get("/connection-rules")
+async def get_connection_rules():
+    """Which socket may be wired to which, and the reason when it may not.
+
+    The canvas cannot ask the compiler while someone is dragging an edge, so it
+    holds these as a lookup table and judges the connection itself. Served as
+    data rather than reimplemented in the browser on purpose: the frontend has
+    no test runner, so a second implementation there would be the only copy of
+    the rules nothing checks. `tests/test_connection_rules.py` proves this set
+    is exactly what the compiler enforces.
+    """
+    from app.compiler.connection_rules import rules_document
+
+    return rules_document()
 
 
 @router.post("", response_model=WorkflowRead)
@@ -83,13 +100,24 @@ async def save_and_compile(
     errors, warnings, ir = run_compiler(body.canvas, version_id)
     is_valid = len(errors) == 0
 
+    # The same results with the node or edge each is about attached, so the
+    # canvas can mark it. A second pass over the rules costs ~0.5 ms and keeps
+    # `run_compiler`'s signature -- and its twenty callers -- untouched.
+    node_types = {n.id: n.type for n in body.canvas.nodes}
+    findings = [f.to_dict(node_types) for f in collect_all_findings(body.canvas).items]
+
     version = WorkflowVersion(
         id=version_id,
         workflow_id=workflow_id,
         version_number=version_number,
         canvas_json=body.canvas.model_dump(),
         ir_json=ir.to_dict() if ir else None,
-        validation_errors=errors,
+        # Stored as finding dicts rather than strings. The column is already
+        # JSON and already typed `list[Any]`, so this needs no migration --
+        # which matters because the project has none: `create_all` builds the
+        # schema and will not ALTER an existing table. Readers accept both
+        # shapes, so rows written before this keep working.
+        validation_errors=findings,
         is_valid=is_valid,
     )
     db.add(version)
@@ -100,8 +128,37 @@ async def save_and_compile(
         is_valid=is_valid,
         errors=errors,
         warnings=warnings,
+        findings=findings,
         ir=ir.to_dict() if ir else None,
     )
+
+
+@router.post("/validate")
+async def validate_canvas(body: ValidateRequest):
+    """Check a canvas without saving it, for live feedback while editing.
+
+    `POST /versions` cannot serve this: it writes a new version row every time,
+    so using it for feedback would fill the history with a row per keystroke.
+    Nothing is persisted here and the canvas need not be valid -- a half-drawn
+    one is exactly when this is most useful.
+
+    A full pass is ~0.5 ms, so the caller can run it on every change.
+    """
+    from app.schemas.canvas import CanvasPayload
+
+    try:
+        canvas = CanvasPayload.model_validate(body.canvas)
+    except Exception as exc:  # noqa: BLE001 - a half-drawn canvas is normal here
+        raise HTTPException(
+            status_code=422, detail=f"Canvas could not be read: {exc}"
+        ) from exc
+
+    node_types = {n.id: n.type for n in canvas.nodes}
+    findings = [f.to_dict(node_types) for f in collect_all_findings(canvas).items]
+    return {
+        "findings": findings,
+        "is_valid": not any(f["severity"] == "error" for f in findings),
+    }
 
 
 @router.get("/{workflow_id}/versions", response_model=list[WorkflowVersionRead])
@@ -685,11 +742,34 @@ def _read_version(version: WorkflowVersion) -> WorkflowVersionRead:
         # exist, so it cannot be executed or packaged until it is re-saved.
         read.is_valid = False
         read.validation_errors = [
-            "This workflow was built before the move to A2A graph workflows and "
-            "has been migrated. Save & Compile to apply it.",
-            *(f"Migration: {note}" for note in notes),
+            _migration_notice(
+                "This workflow was built before the move to A2A graph workflows "
+                "and has been migrated. Save & Compile to apply it."
+            ),
+            *(_migration_notice(f"Migration: {note}") for note in notes),
         ]
     return read
+
+
+def _migration_notice(message: str) -> dict[str, object]:
+    """A migration note in the same shape as a validation finding.
+
+    `validation_errors` now holds finding dicts, and a reader that has to
+    handle two shapes in one list would be a trap. These are about the
+    workflow rather than any one node, so they anchor to nothing.
+    """
+    return {
+        "code": "canvas.migrated",
+        "severity": "error",
+        "text": message,
+        "message": message,
+        "subject": "workflow",
+        "node_id": None,
+        "edge_id": None,
+        "handle": None,
+        "related_node_ids": [],
+        "related_edge_ids": [],
+    }
 
 async def _get_or_404(db: AsyncSession, model, id: str):
     result = await db.execute(select(model).where(model.id == id))

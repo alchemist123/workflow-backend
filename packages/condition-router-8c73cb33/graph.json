@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "workflow": {
+    "name": "Condition Router",
+    "slug": "condition_router",
+    "description": "Routes by score threshold \u2014 high (>50) gets premium tier, low gets standard.",
+    "version_id": "8c73cb33-d436-4024-be43-6db1d982b7b9",
+    "canvas_version": 7
+  },
+  "entry_node": "a2a_start",
+  "terminal_node": "n_end_2",
+  "nodes": [
+    {
+      "name": "a2a_start",
+      "canvas_id": "trigger",
+      "type": "A2A_START",
+      "module": "nodes.a2a_start",
+      "title": "A2A Start",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "description": "Send {score: number, message: string}",
+      "config": {
+        "input_mode": "json",
+        "state_key": "wf",
+        "payload_schema": {
+          "fields": [
+            {
+              "name": "score",
+              "type": "integer",
+              "description": "Score used for routing",
+              "required": true
+            },
+            {
+              "name": "message",
+              "type": "string",
+              "description": "Message echoed back",
+              "required": true
+            }
+          ]
+        }
+      },
+      "is_entry": true
+    },
+    {
+      "name": "n_condition_1",
+      "canvas_id": "condition",
+      "type": "CONDITION",
+      "module": "nodes.n_condition_1",
+      "title": "Score Check",
+      "timeout": 30,
+      "retries": 1,
+      "on_error": "fail",
+      "description": "Route: score > 50 \u2192 premium, else \u2192 standard",
+      "config": {
+        "branches": [
+          {
+            "name": "high_score",
+            "expression": "data.get('score', 0) > 50"
+          },
+          {
+            "name": "low_score",
+            "expression": "data.get('score', 0) <= 50"
+          }
+        ]
+      },
+      "routes": [
+        "high_score",
+        "low_score"
+      ]
+    },
+    {
+      "name": "n_end_2",
+      "canvas_id": "end",
+      "type": "END",
+      "module": "nodes.n_end_2",
+      "title": "End",
+      "timeout": 30,
+      "retries": 1,
+      "on_error": "fail",
+      "description": "Both branches converge here",
+      "is_terminal": true
+    },
+    {
+      "name": "n_transform_3",
+      "canvas_id": "transform_high",
+      "type": "TRANSFORM",
+      "module": "nodes.n_transform_3",
+      "title": "Premium Response",
+      "timeout": 30,
+      "retries": 1,
+      "on_error": "fail",
+      "description": "Enrich response for high-score users",
+      "config": {
+        "mode": "jinja2",
+        "expression": "{\"tier\": \"premium\", \"message\": \"{{ message }}\", \"score\": {{ score }}, \"perk\": \"10% discount applied\"}"
+      }
+    },
+    {
+      "name": "n_transform_4",
+      "canvas_id": "transform_low",
+      "type": "TRANSFORM",
+      "module": "nodes.n_transform_4",
+      "title": "Standard Response",
+      "timeout": 30,
+      "retries": 1,
+      "on_error": "fail",
+      "description": "Standard response for low-score users",
+      "config": {
+        "mode": "jinja2",
+        "expression": "{\"tier\": \"standard\", \"message\": \"{{ message }}\", \"score\": {{ score }}}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "START",
+      "to": "a2a_start",
+      "route": null
+    },
+    {
+      "from": "a2a_start",
+      "to": "n_condition_1",
+      "route": null
+    },
+    {
+      "from": "n_condition_1",
+      "to": "n_transform_3",
+      "route": "high_score"
+    },
+    {
+      "from": "n_condition_1",
+      "to": "n_transform_4",
+      "route": "low_score"
+    },
+    {
+      "from": "n_transform_3",
+      "to": "n_end_2",
+      "route": null
+    },
+    {
+      "from": "n_transform_4",
+      "to": "n_end_2",
+      "route": null
+    }
+  ],
+  "join_nodes": [],
+  "env_keys": [
+    {
+      "key": "PORT",
+      "required": false,
+      "needed_by": [
+        "serving"
+      ],
+      "default": "8080",
+      "description": "Port the agent listens on."
+    },
+    {
+      "key": "AGENT_NAME",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ],
+      "default": "condition_router",
+      "description": "Advertised agent name."
+    },
+    {
+      "key": "AGENT_DESCRIPTION",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ],
+      "description": "Advertised description."
+    },
+    {
+      "key": "AGENT_VERSION",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ],
+      "default": "1.0.0",
+      "description": "Advertised version."
+    },
+    {
+      "key": "CLOUD_RUN_URL",
+      "required": false,
+      "needed_by": [
+        "agent_card"
+      ],
+      "default": "",
+      "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost."
+    },
+    {
+      "key": "A2A_AUTH_TOKEN",
+      "required": false,
+      "needed_by": [
+        "inbound_auth"
+      ],
+      "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+      "secret": true
+    },
+    {
+      "key": "TASK_STORE_DSN",
+      "required": false,
+      "needed_by": [
+        "task_persistence"
+      ],
+      "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+      "secret": true
+    }
+  ]
+}

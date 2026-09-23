@@ -45,11 +45,39 @@ class SaveCanvasRequest(BaseModel):
     canvas: CanvasPayload
 
 
+class FindingRead(BaseModel):
+    """One validation result, and the thing on the canvas it is about.
+
+    `text` is the message as the compile log has always shown it; `message` is
+    the same sentence without its `Node '<id>' (TYPE)` opening, for a canvas
+    that heads it with the node's title instead.
+    """
+
+    code: str = ""
+    severity: str
+    text: str
+    message: str
+    subject: str
+    node_id: str | None = None
+    edge_id: str | None = None
+    handle: str | None = None
+    related_node_ids: list[str] = []
+    related_edge_ids: list[str] = []
+
+
+class ValidateRequest(BaseModel):
+    """Check a canvas without saving it. Used for live feedback while editing."""
+
+    canvas: dict[str, Any]
+
+
 class CompileResponse(BaseModel):
     version_id: str
     is_valid: bool
     errors: list[str]
     warnings: list[str] = []
+    # Additive: the same results, anchored. An older client ignores it.
+    findings: list[FindingRead] = []
     ir: dict[str, Any] | None
 
 

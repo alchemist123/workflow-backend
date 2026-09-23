@@ -1,0 +1,250 @@
+{
+  "schema_version": 1,
+  "workflow": {
+    "name": "Variables",
+    "slug": "variables",
+    "description": "Nodes name their results; later nodes read them by name, including across edges that no longer carry them.",
+    "version_id": "c0a51051-926c-4566-8ffc-68de93197be3",
+    "canvas_version": 7
+  },
+  "entry_node": "a2a_start",
+  "terminal_node": "n_end_2",
+  "nodes": [
+    {
+      "name": "a2a_start",
+      "canvas_id": "trigger",
+      "type": "A2A_START",
+      "module": "nodes.a2a_start",
+      "title": "Order",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "input_mode": "json",
+        "state_key": "wf",
+        "output_variable": "order",
+        "payload_schema": {
+          "fields": [
+            {
+              "name": "sku",
+              "type": "string",
+              "description": "What was ordered",
+              "required": true
+            },
+            {
+              "name": "qty",
+              "type": "integer",
+              "description": "How many",
+              "required": true
+            }
+          ]
+        }
+      },
+      "is_entry": true
+    },
+    {
+      "name": "n_condition_6",
+      "canvas_id": "tier",
+      "type": "CONDITION",
+      "module": "nodes.n_condition_6",
+      "title": "Bulk?",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "branches": [
+          {
+            "name": "bulk",
+            "expression": "vars['priced']['total'] >= 100"
+          },
+          {
+            "name": "standard",
+            "expression": "True"
+          }
+        ]
+      },
+      "routes": [
+        "bulk",
+        "standard"
+      ]
+    },
+    {
+      "name": "n_end_2",
+      "canvas_id": "end",
+      "type": "END",
+      "module": "nodes.n_end_2",
+      "title": "End",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "output_mapping": {}
+      },
+      "is_terminal": true
+    },
+    {
+      "name": "n_transform_1",
+      "canvas_id": "bulk",
+      "type": "TRANSFORM",
+      "module": "nodes.n_transform_1",
+      "title": "Bulk Tier",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "mode": "python",
+        "expression": "result = {'tier': 'bulk', 'discount': 0.1}"
+      }
+    },
+    {
+      "name": "n_transform_3",
+      "canvas_id": "label",
+      "type": "TRANSFORM",
+      "module": "nodes.n_transform_3",
+      "title": "Describe It",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "mode": "python",
+        "expression": "result = {'label': vars['order']['sku'] + ' x' + str(vars['order']['qty']) + ' = ' + str(vars['priced']['total'])}"
+      }
+    },
+    {
+      "name": "n_transform_4",
+      "canvas_id": "price",
+      "type": "TRANSFORM",
+      "module": "nodes.n_transform_4",
+      "title": "Price It",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "mode": "python",
+        "output_variable": "priced",
+        "expression": "result = {'total': (data.get('qty') or 0) * 25}"
+      }
+    },
+    {
+      "name": "n_transform_5",
+      "canvas_id": "standard",
+      "type": "TRANSFORM",
+      "module": "nodes.n_transform_5",
+      "title": "Standard Tier",
+      "timeout": 60,
+      "retries": 1,
+      "on_error": "fail",
+      "config": {
+        "mode": "python",
+        "expression": "result = {'tier': 'standard', 'discount': 0}"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "START",
+      "to": "a2a_start",
+      "route": null
+    },
+    {
+      "from": "a2a_start",
+      "to": "n_transform_4",
+      "route": null
+    },
+    {
+      "from": "n_condition_6",
+      "to": "n_transform_1",
+      "route": "bulk"
+    },
+    {
+      "from": "n_condition_6",
+      "to": "n_transform_5",
+      "route": "standard"
+    },
+    {
+      "from": "n_transform_1",
+      "to": "n_end_2",
+      "route": null
+    },
+    {
+      "from": "n_transform_3",
+      "to": "n_condition_6",
+      "route": null
+    },
+    {
+      "from": "n_transform_4",
+      "to": "n_transform_3",
+      "route": null
+    },
+    {
+      "from": "n_transform_5",
+      "to": "n_end_2",
+      "route": null
+    }
+  ],
+  "join_nodes": [],
+  "env_keys": [
+    {
+      "key": "PORT",
+      "required": false,
+      "needed_by": [
+        "serving"
+      ],
+      "default": "8080",
+      "description": "Port the agent listens on."
+    },
+    {
+      "key": "AGENT_NAME",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ],
+      "default": "variables",
+      "description": "Advertised agent name."
+    },
+    {
+      "key": "AGENT_DESCRIPTION",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ],
+      "description": "Advertised description."
+    },
+    {
+      "key": "AGENT_VERSION",
+      "required": true,
+      "needed_by": [
+        "agent_card"
+      ],
+      "default": "1.0.0",
+      "description": "Advertised version."
+    },
+    {
+      "key": "CLOUD_RUN_URL",
+      "required": false,
+      "needed_by": [
+        "agent_card"
+      ],
+      "default": "",
+      "description": "Public base URL; becomes the agent card's url. Blank falls back to localhost."
+    },
+    {
+      "key": "A2A_AUTH_TOKEN",
+      "required": false,
+      "needed_by": [
+        "inbound_auth"
+      ],
+      "description": "When set, callers must send this as a bearer token and the agent card advertises that it is required.",
+      "secret": true
+    },
+    {
+      "key": "TASK_STORE_DSN",
+      "required": false,
+      "needed_by": [
+        "task_persistence"
+      ],
+      "description": "SQLAlchemy async DSN. Blank uses an in-memory store, so tasks/get only works within one process and in-flight tasks are lost on restart.",
+      "secret": true
+    }
+  ]
+}

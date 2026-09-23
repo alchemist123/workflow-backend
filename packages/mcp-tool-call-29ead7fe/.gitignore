@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Parked test runs (run_once.py keeps tasks and sessions here).
+.runs/

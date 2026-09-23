@@ -125,7 +125,21 @@ def get_node_definition(node_type: str) -> NodeDefinition | None:
 
 
 def get_palette() -> list[dict]:
-    """Return palette metadata for all registered node types, sorted by wave then category."""
+    """Palette metadata for every registered node type, by wave then category.
+
+    This is what the canvas draws a node from, so it carries the flags the
+    canvas needs to draw it *correctly* -- which sockets it has, and what may
+    legally be wired to each. Those used to be omitted, so the frontend kept a
+    hand-written copy of the node list instead and quietly drifted from it: the
+    AGENT type was missing entirely and rendered as "Unknown node type".
+
+    `tool_handles` is derived rather than declared. The backend has only ever
+    had the boolean `accepts_tools`; the socket name lived in the frontend's
+    copy. Deriving it here is what lets that copy go away.
+
+    `secret_config_keys` is deliberately not published -- the canvas has no use
+    for it and it names credential fields.
+    """
     nodes = sorted(NODE_REGISTRY.values(), key=lambda n: (n.palette.wave, n.palette.category, n.palette.label))
     return [
         {
@@ -140,9 +154,20 @@ def get_palette() -> list[dict]:
             "is_trigger": n.is_trigger,
             "is_terminal": n.is_terminal,
             "output_handles": n.output_handles,
+            "tool_handles": ["tools"] if n.accepts_tools else [],
             "config_schema": n.config_schema,
             "input_schema": n.input_schema,
             "output_schema": n.output_schema,
+            # Flags the canvas needs to judge a connection as it is drawn.
+            "allows_inbound": n.allows_inbound,
+            "allows_outbound": n.allows_outbound,
+            "accepts_tools": n.accepts_tools,
+            "provides_tool": n.provides_tool,
+            "is_tool_group": n.is_tool_group,
+            "is_agent": n.is_agent,
+            "uses_named_routes": n.uses_named_routes,
+            "allows_cycle": n.allows_cycle,
+            "supports_on_error_continue": n.supports_on_error_continue,
         }
         for n in nodes
     ]

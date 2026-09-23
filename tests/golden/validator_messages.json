@@ -1,0 +1,97 @@
+{
+  "healthy": {
+    "errors": [],
+    "warnings": []
+  },
+  "no_entry_no_terminal": {
+    "errors": [
+      "Workflow must have exactly one A2A_START node (found none)",
+      "Workflow must have exactly one END node (found none)"
+    ],
+    "warnings": []
+  },
+  "two_entries_two_terminals": {
+    "errors": [
+      "Workflow must have exactly one A2A_START node (found 2: 'start', 'start2')",
+      "Workflow must have exactly one END node (found 2: 'end', 'end2'). Route every path to a single END, using a MERGE node to rejoin parallel branches."
+    ],
+    "warnings": []
+  },
+  "edge_to_nowhere": {
+    "errors": [
+      "Edge 'e_start_ghost_input_output': target node 'ghost' does not exist",
+      "Edge 'e_phantom_end_input_output': source node 'phantom' does not exist"
+    ],
+    "warnings": []
+  },
+  "tool_wiring": {
+    "errors": [
+      "Node 'group' (SEQUENTIAL_AGENT) is not reachable from the A2A_START node 'start' and would never run.",
+      "Node 'shape' (TRANSFORM) cannot be used as a tool. Only these can: DATASOURCE, FUNCTION, LLM_AGENT, PARALLEL_AGENT, REMOTE_AGENT, SEQUENTIAL_AGENT, TOOL.",
+      "Node 'shape' (TRANSFORM) has no tools input, so 'agent' cannot be wired into it as a tool. Tools connect to: AGENT, LLM_AGENT, ORCHESTRATOR_AGENT, PARALLEL_AGENT, SEQUENTIAL_AGENT.",
+      "Node 'group' (SEQUENTIAL_AGENT) is a tool group, so its output must connect to the tools input of an agent or another group \u2014 not into the workflow flow (currently 'end').",
+      "Node 'group' (SEQUENTIAL_AGENT) is not connected to anything. Connect its output to the tools input of an agent or another group.",
+      "Node 'group' (SEQUENTIAL_AGENT) has no tools connected to it. Wire at least one tool, remote agent or function into it.",
+      "Tools are wired in a loop: agent -> shape -> agent. A group or agent cannot contain itself."
+    ],
+    "warnings": []
+  },
+  "fork_without_merge": {
+    "errors": [
+      "Node 'right' (TRANSFORM) has no outbound edge, so it would end the workflow alongside the END node. Connect it onward to the END node.",
+      "Node 'fork' (PARALLEL_FORK) has branches that never rejoin. Every branch must reach a common MERGE node, or the run fails with multiple terminal outputs."
+    ],
+    "warnings": []
+  },
+  "unreachable_and_orphaned": {
+    "errors": [
+      "Node 'island' (TRANSFORM) is not reachable from the A2A_START node 'start' and would never run.",
+      "Cycle detected without a LOOP node: island"
+    ],
+    "warnings": [
+      "Node 'floating' (WAIT) is not connected to any edge and will be skipped"
+    ]
+  },
+  "human_and_loop_handles": {
+    "errors": [
+      "Node 'ask' (HUMAN_APPROVAL) has nothing on its 'rejected' output, so a rejected decision would have nowhere to go. Connect both outputs.",
+      "Node 'repeat' (LOOP) has nothing on its 'loop_body' output, which is the body to repeat."
+    ],
+    "warnings": []
+  },
+  "bad_configs": {
+    "errors": [
+      "Node 'shape' (TRANSFORM) builds no fields. Add at least one output field, or switch to an expression mode.",
+      "Node 'pick' (CONDITION) must define at least one branch",
+      "Node 'pause' (WAIT) has no duration, so it would not wait at all. Set how long to wait, or remove the node.",
+      "Node 'call' (MCP_TOOL) has no server URL. Enter one and fetch the server's tools.",
+      "Node 'call' (MCP_TOOL) names no tool. Fetch the server's tools and pick one."
+    ],
+    "warnings": []
+  },
+  "variables_and_mapping": {
+    "errors": [
+      "Node 'start' (A2A_START): 'wf' is reserved. Workflow state uses 'wf', loops use '_loop_*', and ADK reserves 'app:', 'user:' and 'temp:'.",
+      "Node 'shape' (TRANSFORM): 'a' reads 'data.nope', which nothing upstream produces. Available here: data.sku, vars.wf, vars.wf.sku.",
+      "Node 'shape' (TRANSFORM) builds 'a' twice.",
+      "Node 'shape' (TRANSFORM) has an output field with no name.",
+      "Node 'shape' (TRANSFORM): 'output field 3' has no source. Pick where its value comes from, or give it a default."
+    ],
+    "warnings": [
+      "Node 'shape' (TRANSFORM): 'a' is declared integer but 'data.sku' is string. It will be converted, or passed through unchanged if it cannot be.",
+      "Node 'again' (TRANSFORM) saves to 'dup', which node 'shape' also saves to. Whichever runs last wins."
+    ]
+  },
+  "duplicate_edges": {
+    "errors": [],
+    "warnings": [
+      "Duplicate edge from 'start' to 'shape' (2 copies); only one will be kept."
+    ]
+  },
+  "retired_trigger": {
+    "errors": [
+      "Node 'old' uses 'HTTP_TRIGGER', which no longer exists. Workflows now start from a single A2A_START node. Re-open and re-save this workflow to migrate it automatically."
+    ],
+    "warnings": []
+  }
+}
