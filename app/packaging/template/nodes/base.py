@@ -15,7 +15,6 @@ A generated node file is small and self-contained:
     async def n_transform_7(ctx: Context, node_input=None):
         ...
         return Event(output=out)
-
 Three ADK rules shape that shape, and they are the reason this module exists
 rather than each node re-deriving them:
 

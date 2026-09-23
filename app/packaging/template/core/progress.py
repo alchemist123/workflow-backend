@@ -18,7 +18,6 @@ depend on log configuration.
 Nothing reads it unless something is watching, and a closed or unwritable
 stream is never allowed to fail a run — this is telemetry, not the result.
 """
-
 from __future__ import annotations
 
 import json

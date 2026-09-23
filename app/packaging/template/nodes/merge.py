@@ -15,7 +15,6 @@ comes from `_requires_all_predecessors` on the node class itself.
 own order is arrival order, a race between branches, so anything that picks or
 lists results uses this instead and gives the same answer every run.
 """
-
 from __future__ import annotations
 
 from typing import Any, AsyncGenerator

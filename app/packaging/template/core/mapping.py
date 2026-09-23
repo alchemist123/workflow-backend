@@ -21,7 +21,6 @@ import logging
 from typing import Any
 
 logger = logging.getLogger("workflow.mapping")
-
 # Canvas field type -> the Python type a value is coerced to.
 PY_TYPES: dict[str, type] = {
     "string": str,
