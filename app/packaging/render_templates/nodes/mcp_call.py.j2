@@ -97,3 +97,4 @@ async def {{ node.name }}(ctx: Context, node_input=None):
 {% endif %}
     merge_state(ctx, out)
     return Event(output={**data, **out})
+    

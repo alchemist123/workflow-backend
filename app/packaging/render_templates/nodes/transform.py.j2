@@ -83,3 +83,4 @@ async def {{ node.name }}(ctx: Context, node_input=None):
     log.info("transformed %d key(s) into %d", len(data), len(result))
     merge_state(ctx, result)
     return Event(output={**data, **result})
+    
