@@ -76,3 +76,6 @@ Thumbs.db
 node_modules/
 dist/
 build/
+
+# Generated agent packages (see app/packaging/builder.py)
+packages/

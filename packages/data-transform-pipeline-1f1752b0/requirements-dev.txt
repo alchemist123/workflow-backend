@@ -1,5 +1,0 @@
-# Test-only dependencies. Not installed into the container image --
-# see the Dockerfile, which installs requirements.txt only.
--r requirements.txt
-pytest>=8.0
-pytest-asyncio>=0.24
